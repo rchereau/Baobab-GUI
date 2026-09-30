@@ -6,6 +6,7 @@ tracking for the UNIGE Baobab cluster. Used by baobab_app.py.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -68,6 +69,61 @@ class BaobabError(Exception):
 
 class PassphraseRequired(BaobabError):
     pass
+
+
+class UnknownHostKey(BaobabError):
+    """A server this app has never seen: the user must confirm its fingerprint once."""
+
+    def __init__(self, host: str, key_type: str, fingerprint: str):
+        super().__init__(f"Unknown server {host}")
+        self.host, self.key_type, self.fingerprint = host, key_type, fingerprint
+
+
+# ── Server identity ───────────────────────────────────────────────────────────
+# Fingerprints of Baobab's login node. RSA: UNIGE HPC documentation (hpc/access_the_hpc_clusters).
+# ED25519: seen when logging in to login1.baobab and confirmed on the node itself with
+# `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
+PINNED_HOST_KEYS = {
+    "login1.baobab.hpc.unige.ch": {
+        "ssh-rsa": "SHA256:tKqp4nljL+EGVKl8T0VF2nS36DkHVFMpLxQOPg/gKvg",
+        "ssh-ed25519": "SHA256:R/cy4lk5x8qKwmrIq8R9tiRdneDtorBnqzEynx8OnGI",
+    },
+}
+KNOWN_HOSTS_FILE = APP_DIR / "known_hosts"          # servers the user confirmed
+# Only negotiate key types that are pinned, so a pinned server never shows another one
+_UNPINNED_KEY_TYPES = ["ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                       "ssh-dss"]
+
+
+def fingerprint(key) -> str:
+    return "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+
+
+class _VerifyHostKey(paramiko.MissingHostKeyPolicy):
+    """Pinned servers must match their known fingerprint; others need the user's OK."""
+
+    def __init__(self, accept: str | None):
+        self.accept = accept
+
+    def missing_host_key(self, client, hostname, key):
+        name = hostname.split("]")[0].lstrip("[") if hostname.startswith("[") else hostname
+        fp, ktype = fingerprint(key), key.get_name()
+        pinned = PINNED_HOST_KEYS.get(name.lower())
+        if pinned is not None:
+            if pinned.get(ktype) != fp:
+                raise BaobabError(
+                    f"SECURITY WARNING: {name} presented an unexpected identity ({ktype} {fp}). "
+                    "This can mean that someone is impersonating the cluster, for example on a "
+                    "public Wi-Fi. The app did not connect and sent nothing. Try another network, "
+                    "and if it persists, contact the HPC team.")
+        elif self.accept != fp:
+            raise UnknownHostKey(name, ktype, fp)
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        try:
+            KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            client.save_host_keys(str(KNOWN_HOSTS_FILE))
+        except OSError:
+            pass
 
 
 # ── Profile ───────────────────────────────────────────────────────────────────
@@ -235,7 +291,8 @@ class Connection:
         self.hostname: str = ""
         self._lock = threading.RLock()
 
-    def connect(self, profile: dict, passphrase: str | None = None) -> str:
+    def connect(self, profile: dict, passphrase: str | None = None,
+                accept_fingerprint: str | None = None) -> str:
         user = profile.get("username", "").strip()
         host = profile.get("host", "").strip() or DEFAULT_HOST
         if not user:
@@ -245,10 +302,17 @@ class Connection:
             client.load_system_host_keys()
         except (OSError, paramiko.SSHException):
             pass
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if KNOWN_HOSTS_FILE.exists():
+            try:
+                client.load_host_keys(str(KNOWN_HOSTS_FILE))
+            except (OSError, paramiko.SSHException):
+                pass
+        client.set_missing_host_key_policy(_VerifyHostKey(accept_fingerprint))
         kw = dict(hostname=host, username=user, port=int(profile.get("port", 22)),
                   timeout=20, banner_timeout=30, auth_timeout=30,
                   allow_agent=True, look_for_keys=True)
+        if host.lower() in PINNED_HOST_KEYS:
+            kw["disabled_algorithms"] = {"keys": _UNPINNED_KEY_TYPES}
         key_path = profile.get("key_path", "").strip()
         if key_path:
             kp = Path(key_path).expanduser()
@@ -263,6 +327,14 @@ class Connection:
             kw["passphrase"] = passphrase
         try:
             client.connect(**kw)
+        except BaobabError:
+            raise                                   # identity checks (unknown / wrong key)
+        except paramiko.BadHostKeyException as e:
+            raise BaobabError(
+                f"SECURITY WARNING: {host} presented an identity that differs from the one "
+                f"recorded earlier ({fingerprint(e.key)}). This can mean that someone is "
+                "impersonating the server. The app did not connect. If the HPC team announced a "
+                f"change, remove the old entry for {host} from your known_hosts file.") from e
         except paramiko.PasswordRequiredException:
             raise PassphraseRequired("Your SSH key is protected by a passphrase.")
         except paramiko.AuthenticationException:
@@ -282,7 +354,7 @@ class Connection:
             self.close()
             self.client = client
             self.profile = dict(profile)
-            self.passphrase = passphrase
+            self.passphrase = passphrase        # (the confirmed key is now remembered)
         self.hostname = self.run("hostname")[0].strip()
         self.scratch = self._detect_scratch()
         return self.hostname

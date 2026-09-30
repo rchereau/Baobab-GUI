@@ -1,5 +1,7 @@
 # Baobab HPC — setup and user guide
 
+> **Not an official UNIGE tool.** Baobab HPC is an independent project and is not developed, endorsed or supported by the University of Geneva or its HPC team. For questions about the cluster itself, see the [official documentation](https://doc.eresearch.unige.ch/hpc/start); for questions about this app, open an issue in this repository.
+
 A Windows desktop app to run MATLAB and Python jobs on the UNIGE **Baobab** cluster. You choose your code, your data and the resources; the app copies everything to the cluster, submits the job, follows it, and brings the results back next to your data. Every transferred file is verified with a SHA-256 checksum.
 
 ---
@@ -20,6 +22,7 @@ Baobab GUI\
 ├── baobab_core.py        transfers, checksums, SLURM
 ├── requirements.txt
 ├── README.md
+├── LICENSE               MIT licence
 └── examples\           demo dataset + MATLAB and Python demo projects
 ```
 
@@ -84,6 +87,8 @@ ssh <your_isis_username>@login1.baobab.hpc.unige.ch
 - The first time, you're asked to confirm the server fingerprint. The official one is `SHA256:tKqp4nljL+EGVKl8T0VF2nS36DkHVFMpLxQOPg/gKvg`. If it matches, type `yes`.
 - A prompt like `(baobab)-[username@login1 ~]$` means it works. Type `exit` to leave.
 
+**The app checks the server's identity too.** It has Baobab's fingerprints built in: the RSA one above, from the official documentation, and the ED25519 one. If the server ever presents a different identity, the app refuses to connect and shows a security warning. This protects you against someone impersonating the cluster, for example on a public Wi-Fi. For any other server, the app shows its fingerprint and asks you to confirm it once.
+
 > Three failed logins in a row ban you for 15 minutes. If the key is refused, wait for the sync instead of retrying.
 
 ---
@@ -94,7 +99,7 @@ On the **Settings** page:
 
 | Field | Value |
 |---|---|
-| ISIS username | your UNIGE login, e.g. `chereau` |
+| ISIS username | your UNIGE login, e.g. `jdoe` |
 | Email | your UNIGE address, for end-of-job emails |
 | Cluster | `login1.baobab.hpc.unige.ch` (prefilled) |
 | SSH key | `C:\Users\<you>\.ssh\id_rsa` (prefilled if found) |
@@ -258,6 +263,7 @@ Ask only for the time and memory you need: smaller requests start sooner. After 
 | *Baobab rejected your SSH key* | The public key isn't registered or not synced yet. Check my-account.unige.ch and wait 15 minutes. |
 | *SSH key file not found* | Wrong key path in Settings. Check with `dir %USERPROFILE%\.ssh`. |
 | *Baobab closed the connection before login* / `Connection closed by … port 22` | You're outside the UNIGE network: connect to the UNIGE VPN. Otherwise your address is banned for 15 minutes after 3 failed logins; wait without retrying. |
+| *SECURITY WARNING: … presented an unexpected identity* | The server did not prove it is Baobab. Don't force it: switch to another network, such as the UNIGE VPN or your phone's connection, and if it persists, contact the HPC team. The app has sent nothing, neither key nor data. |
 | *Cannot reach login1…* | No network, or the Wi-Fi blocks SSH. Try another network. |
 | *This request cannot run on …* | The tile says why: wall time over the limit, no node with that many CPUs or that much memory, or no GPU. Change the resources or pick a tile marked **Can start now** or **Will queue**. |
 | Job stuck in `PENDING` | The requested resources are busy. A shorter wall time or fewer CPUs helps. |
@@ -272,3 +278,9 @@ Ask only for the time and memory you need: smaller requests start sooner. After 
 **On the cluster:** scratch is **not backed up**, so keep your originals locally. Jobs are in `~/scratch/baobab_jobs/` and datasets in `~/scratch/baobab_data/`; delete old ones there when you no longer need them. Accounts inactive for a year are deleted along with their data.
 
 **Official documentation:** <https://doc.eresearch.unige.ch/hpc/start> · HPC community forum: <https://hpc-community.unige.ch>
+
+---
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). You may use, modify and share this app freely, including in other labs, as long as the licence notice is kept.

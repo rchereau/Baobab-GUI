@@ -415,7 +415,7 @@ class SettingsPage(Page):
         f.setVerticalSpacing(10)
         f.setHorizontalSpacing(16)
         self.user = QLineEdit(p["username"])
-        self.user.setPlaceholderText("ISIS username, e.g. chereau")
+        self.user.setPlaceholderText("ISIS username, e.g. jdoe")
         self.email = QLineEdit(p["email"])
         self.email.setPlaceholderText("firstname.lastname@unige.ch")
         f.addRow("ISIS username", self.user)
@@ -1732,15 +1732,16 @@ class MainWindow(QMainWindow):
             log.exception("Could not save profile")
 
     # connection
-    def connect_cluster(self, passphrase: str | None = None):
+    def connect_cluster(self, passphrase: str | None = None, accept: str | None = None):
         self.save_profile()
+        self._passphrase = passphrase
         prof = dict(self.profile)
         t = self.settings_page
         t.connect_btn.setEnabled(False)
         t.status.setText("Connecting...")
         set_kind(t.status, "hint")
         self.set_pill(False, "Connecting...")
-        self.run_task(lambda _p: self.conn.connect(prof, passphrase),
+        self.run_task(lambda _p: self.conn.connect(prof, passphrase, accept),
                       on_done=self.connected, on_fail=lambda e: self.connect_failed(e))
 
     def connected(self, hostname: str):
@@ -1757,6 +1758,25 @@ class MainWindow(QMainWindow):
         t = self.settings_page
         t.connect_btn.setEnabled(True)
         self.set_pill(False)
+        if isinstance(e, core.UnknownHostKey):
+            box = QMessageBox(self)
+            box.setWindowTitle(APP_TITLE)
+            box.setIcon(QMessageBox.Warning)
+            box.setText(f"First connection to {e.host}")
+            box.setInformativeText(
+                "This server is not one the app knows. Check that the fingerprint below matches "
+                "the one published by the cluster's administrators before trusting it:\n\n"
+                f"{e.key_type}\n{e.fingerprint}\n\n"
+                "Trust this server? The app will remember it.")
+            trust = box.addButton("Trust and connect", QMessageBox.AcceptRole)
+            box.addButton("Cancel", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is trust:
+                self.connect_cluster(getattr(self, "_passphrase", None), e.fingerprint)
+                return
+            t.status.setText(f"Not connected: {e.host} was not trusted.")
+            set_kind(t.status, "warn")
+            return
         if isinstance(e, core.PassphraseRequired):
             pw, ok = QInputDialog.getText(self, APP_TITLE, "Passphrase of your SSH key:",
                                           QLineEdit.Password)
