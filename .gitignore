@@ -1,0 +1,33 @@
+# Credentials: never commit SSH keys or similar, even temporarily
+.ssh/
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.pem
+*.ppk
+known_hosts*
+
+# Private Python environment created by Baobab_Launcher.bat
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Interrupted downloads
+*.part
+
+# Editor / OS files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Shortcuts made by the launcher (they contain this PC's paths)
+*.lnk
+
+# Demo results (downloaded or produced by local runs)
+examples/demo_data/results/
+examples/matlab_demo/results/
+examples/python_demo/results/

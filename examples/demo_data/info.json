@@ -1,0 +1,24 @@
+{
+  "description": "Synthetic calcium-imaging-like traces for testing Baobab HPC",
+  "sampling_rate_hz": 30.0,
+  "duration_s": 60.0,
+  "n_cells": 20,
+  "n_sessions": 4,
+  "responsive_cells": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "files": [
+    "session_01.csv",
+    "session_02.csv",
+    "session_03.csv",
+    "session_04.csv",
+    "stimulus_onsets.csv"
+  ]
+}
