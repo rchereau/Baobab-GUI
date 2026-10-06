@@ -50,7 +50,8 @@ from PySide6.QtWidgets import (  # noqa: E402
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGraphicsDropShadowEffect,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+    QListWidget, QListWidgetItem, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget)
 
 import baobab_core as core  # noqa: E402
 
@@ -172,7 +173,7 @@ BADGES = {"now": ("Can start now", C["ok"], C["ok_soft"]),
           "wait": ("Will queue", C["warn"], C["warn_soft"]),
           "never": ("Not possible", C["err"], C["err_soft"]),
           "unknown": ("", C["muted"], C["grey_soft"])}
-STATE_COLORS = {"RUNNING": C["ok_soft"], "PENDING": C["warn_soft"], "COMPLETED": C["grey_soft"],
+STATE_COLORS = {"STAGING": C["accent_soft"], "UPLOADING": C["accent_soft"], "RUNNING": C["ok_soft"], "PENDING": C["warn_soft"], "COMPLETED": C["grey_soft"],
                 "FAILED": C["err_soft"], "TIMEOUT": C["err_soft"], "OUT_OF_MEMORY": C["err_soft"],
                 "CANCELLED": "#f3e8fb", "NODE_FAIL": C["err_soft"], "UNKNOWN": C["grey_soft"]}
 GPU_LABELS = {"ampere": "Ampere - multipurpose", "titan": "Titan - single precision / ML",
@@ -190,11 +191,25 @@ def label(text="", kind="hint", wrap=True) -> QLabel:
     lab.setObjectName(kind)
     lab.setWordWrap(wrap)
     lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    lab.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+    sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+    sp.setHeightForWidth(True)            # wrapped text gets the height it needs
+    lab.setSizePolicy(sp)
     return lab
 
 
 hint = label
+
+
+def relayout(w: QWidget):
+    """Make the layouts above w take a new text height into account (needed when a
+    wrapped label changes after the window was laid out)."""
+    if isinstance(w, QLabel) and w.wordWrap() and w.width() > 50:
+        w.setMinimumHeight(w.heightForWidth(w.width()))     # room for every wrapped line
+    while w is not None:
+        w.updateGeometry()
+        if w.layout() is not None:
+            w.layout().invalidate()
+        w = w.parentWidget()
 
 
 def set_kind(w: QWidget, kind: str):
@@ -402,6 +417,81 @@ class PartitionTile(QFrame):
         super().mouseReleaseEvent(ev)
 
 
+# ── NAS folder browser ────────────────────────────────────────────────────────
+class NasBrowser(QDialog):
+    """Browse the lab NAS through Baobab and pick a folder."""
+
+    def __init__(self, win: "MainWindow", start: str, title: str):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle(title)
+        self.resize(640, 520)
+        self.path = start.strip("/")
+        v = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.up_btn = QPushButton("Up")
+        self.up_btn.clicked.connect(self.go_up)
+        self.where = QLabel()
+        self.where.setWordWrap(True)
+        top.addWidget(self.up_btn)
+        top.addWidget(self.where, 1)
+        v.addLayout(top)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(self.open_item)
+        v.addWidget(self.list, 1)
+        self.status = hint("")
+        v.addWidget(self.status)
+        bb = QDialogButtonBox()
+        self.ok_btn = bb.addButton("Select this folder", QDialogButtonBox.AcceptRole)
+        bb.addButton(QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self.load()
+
+    def load(self):
+        self.where.setText(f"<b>{self.win.profile['nas_share']}</b> / {self.path or '(top)'}")
+        self.list.clear()
+        self.status.setText("Reading the NAS through Baobab...")
+        self.ok_btn.setEnabled(False)
+        conn, prof, path = self.win.conn, self.win.profile, self.path
+
+        def done(d):
+            if path != self.path:
+                return
+            self.list.clear()
+            for name in d["dirs"]:
+                it = QListWidgetItem("\U0001F4C1  " + name)
+                it.setData(Qt.UserRole, name)
+                self.list.addItem(it)
+            for f in sorted(d["files"], key=lambda f: f["name"].lower()):
+                it = QListWidgetItem(f"      {f['name']}   ({core.human_size(f['size'])})")
+                it.setFlags(Qt.NoItemFlags)
+                self.list.addItem(it)
+            self.status.setText(f"{len(d['dirs'])} folder(s), {len(d['files'])} file(s). "
+                                "Double-click a folder to open it.")
+            self.ok_btn.setEnabled(bool(path))
+
+        def failed(e):
+            self.status.setText(error_text(e))
+            set_kind(self.status, "warn")
+
+        set_kind(self.status, "hint")
+        self.win.run_task(lambda _p: core.nas_ls(conn, prof["nas_share"], path, False,
+                                                 prof.get("python_modules") or "Python"),
+                          on_done=done, on_fail=failed)
+
+    def open_item(self, it):
+        name = it.data(Qt.UserRole)
+        if name:
+            self.path = f"{self.path}/{name}".strip("/")
+            self.load()
+
+    def go_up(self):
+        self.path = "/".join(self.path.split("/")[:-1])
+        self.load()
+
+
 # ── Page: settings / connection ───────────────────────────────────────────────
 class SettingsPage(Page):
     def __init__(self, win: "MainWindow"):
@@ -458,6 +548,25 @@ class SettingsPage(Page):
         f.addRow("Python version", stack(self.python, self.python_line))
         f.addRow("CUDA module", stack(self.cuda, hint("Loaded for Python GPU jobs.")))
         sw.add(f)
+
+        nas = self.add(Card("Lab NAS",
+                            "Data and results can live on the lab NAS: Baobab copies them "
+                            "directly, without going through this PC."))
+        f = QFormLayout()
+        f.setVerticalSpacing(10)
+        f.setHorizontalSpacing(16)
+        self.nas_share = QLineEdit(p["nas_share"])
+        self.realm = QLineEdit(p["kerberos_realm"])
+        f.addRow("NAS share", self.nas_share)
+        f.addRow("Kerberos realm", stack(self.realm, hint(
+            "Baobab logs in to the NAS with a Kerberos ticket: you give your ISIS password "
+            "once, the ticket lasts 10 hours and the app renews it for up to a week. The "
+            "password is never stored.")))
+        nas.add(f)
+        self.nas_btn = QPushButton("Log in to the NAS")
+        self.nas_btn.clicked.connect(lambda: win.nas_login())
+        self.nas_status = hint("Connect to Baobab first.")
+        nas.add(row(self.nas_status, self.nas_btn))
 
         files = self.add(Card("Files and logs"))
         b = QPushButton("Open the app's data folder")
@@ -519,6 +628,8 @@ class SettingsPage(Page):
         p["matlab_module"] = self.matlab.currentText().strip() or "MATLAB/2022a"
         p["python_version"] = self.python.currentText().strip() or "Python/3.12.3"
         p["cuda_module"] = self.cuda.text().strip() or "CUDA"
+        p["nas_share"] = self.nas_share.text().strip() or core.DEFAULT_PROFILE["nas_share"]
+        p["kerberos_realm"] = self.realm.text().strip().upper() or "ISIS.UNIGE.CH"
 
     def fill_versions(self, matlab: list[str], python: list[str]):
         for combo, items, key in ((self.matlab, matlab, "matlab_module"),
@@ -568,6 +679,10 @@ class NewJobPage(Page):
         f = QFormLayout()
         f.setVerticalSpacing(10)
         f.setHorizontalSpacing(16)
+        self.data_src = QComboBox()
+        self.data_src.addItems(["A folder on this PC", "A folder on the lab NAS"])
+        self.data_src.setMaximumWidth(260)
+        f.addRow("Data from", self.data_src)
         self.data = QLineEdit()
         self.data.setReadOnly(True)
         self.data.setPlaceholderText("Optional - folder with the data your script reads")
@@ -576,16 +691,46 @@ class NewJobPage(Page):
         b2 = QPushButton("Clear")
         b2.clicked.connect(lambda: self.set_data(""))
         self.data_info = hint()
-        f.addRow("Data folder", stack(row(self.data, b1, b2), self.data_info))
+        self.pc_data_row = stack(row(self.data, b1, b2), self.data_info)
+        f.addRow("Data folder", self.pc_data_row)
+        self.nas_data = QLineEdit()
+        self.nas_data.setReadOnly(True)
+        self.nas_data.setPlaceholderText("Folder on the NAS, e.g. GHoltmaat/USERS/me/DATASETS/exp1")
+        b5 = QPushButton("Browse NAS...")
+        b5.clicked.connect(self.pick_nas_data)
+        b6 = QPushButton("Clear")
+        b6.clicked.connect(lambda: self.set_nas_data(""))
+        self.nas_info = hint()
+        self.nas_data_row = stack(row(self.nas_data, b5, b6), self.nas_info)
+        f.addRow("NAS folder", self.nas_data_row)
+        self.res_dest = QComboBox()
+        self.res_dest.addItems(["This PC", "The lab NAS", "Both"])
+        self.res_dest.setMaximumWidth(260)
+        f.addRow("Results go to", self.res_dest)
         self.results = QLineEdit()
         b3 = QPushButton("Choose folder...")
         b3.clicked.connect(self.pick_results)
         b4 = QPushButton("Default")
         b4.clicked.connect(lambda: self.results.clear())
         self.results_info = hint()
-        f.addRow("Results go to", stack(row(self.results, b3, b4), self.results_info))
+        self.pc_res_row = stack(row(self.results, b3, b4), self.results_info)
+        f.addRow("On this PC", self.pc_res_row)
+        self.nas_results = QLineEdit()
+        b7 = QPushButton("Browse NAS...")
+        b7.clicked.connect(self.pick_nas_results)
+        self.nas_res_info = hint()
+        self.nas_res_row = stack(row(self.nas_results, b7), self.nas_res_info)
+        f.addRow("On the NAS", self.nas_res_row)
+        self.full_verify = QCheckBox("Full verification of NAS copies: re-read every file "
+                                     "from the NAS (about twice as long)")
+        f.addRow("", self.full_verify)
+        self.data_form = f
         self.results.textChanged.connect(self.update_results_info)
+        self.nas_results.textChanged.connect(self.update_results_info)
+        self.data_src.currentIndexChanged.connect(lambda _: self.update_data_rows())
+        self.res_dest.currentIndexChanged.connect(lambda _: self.update_data_rows())
         card.add(f)
+        self.nas_listing_total = None
 
         # 3 · where to run
         card = self.add(Card("Where to run", number="3"))
@@ -736,9 +881,85 @@ class NewJobPage(Page):
             self.set_project(p["last_project"])
         if p.get("last_data") and Path(p["last_data"]).is_dir():
             self.set_data(p["last_data"])
+        self.update_data_rows()
         self.update_results_info()
         self.update_resource_hints()
         self.update_fits()
+
+    # data source and results destination
+    def update_data_rows(self):
+        nas = self.data_src.currentIndex() == 1
+        dest = self.res_dest.currentIndex()            # 0 PC, 1 NAS, 2 both
+        self.data_form.setRowVisible(self.pc_data_row, not nas)
+        self.data_form.setRowVisible(self.nas_data_row, nas)
+        self.data_form.setRowVisible(self.pc_res_row, dest in (0, 2))
+        self.data_form.setRowVisible(self.nas_res_row, dest in (1, 2))
+        self.data_form.setRowVisible(self.full_verify, nas or dest in (1, 2))
+        if dest in (1, 2) and not self.nas_results.text() and self.nas_data.text():
+            self.nas_results.setText(self.nas_data.text().rstrip("/") + "/results")
+        self.update_results_info()
+        self.update_resource_hints()
+
+    def pick_nas_data(self):
+        if not self.win.require_nas(self.pick_nas_data):
+            return
+        start = self.nas_data.text() or self.win.profile.get("nas_last_path") or "GHoltmaat/USERS"
+        dlg = NasBrowser(self.win, start, "Data folder on the NAS")
+        if dlg.exec():
+            self.set_nas_data(dlg.path)
+
+    def pick_nas_results(self):
+        if not self.win.require_nas(self.pick_nas_results):
+            return
+        start = self.nas_results.text() or self.nas_data.text() or \
+            self.win.profile.get("nas_last_path") or "GHoltmaat/USERS"
+        dlg = NasBrowser(self.win, start.rsplit("/results", 1)[0], "Results folder on the NAS")
+        if dlg.exec():
+            self.nas_results.setText(dlg.path)
+
+    def set_nas_data(self, path: str):
+        self.nas_data.setText(path)
+        self.nas_listing_total = None
+        if not path:
+            self.nas_info.setText("")
+            return
+        self.win.profile["nas_last_path"] = path
+        if self.res_dest.currentIndex() in (1, 2) and not self.nas_results.text():
+            self.nas_results.setText(path.rstrip("/") + "/results")
+        self.nas_info.setText("Measuring the folder on the NAS...")
+        conn, prof = self.win.conn, self.win.profile
+
+        def done(d):
+            if self.nas_data.text() != path:
+                return
+            files = core.nas_data_files(d)
+            total = sum(f["size"] for f in files)
+            self.nas_listing_total = total
+            self.largest_data_file = max((f["size"] for f in files), default=0)
+            first = total / (80 * 1024 ** 2)
+            skipped = len(d["files"]) - len(files)
+            self.nas_info.setText(
+                f"{len(files)} file(s), {core.human_size(total)}"
+                + (" (its 'results' folder is not copied)" if skipped else "")
+                + f". Copied to Baobab before your job: about "
+                f"{core.human_duration(max(60, int(first)))} the first time, then only changes.")
+            self.nas_info.setToolTip(
+                "A staging job copies the folder to your scratch space on Baobab, directly from "
+                "the NAS, then your job starts. Later jobs on the same folder only copy new or "
+                "changed files. Your script finds the data in ./data/."
+                + (f" The folder's 'results' subfolder ({skipped} file(s)) holds results of "
+                   "earlier jobs and is not copied." if skipped else ""))
+            relayout(self.nas_info)
+            self.update_resource_hints()
+
+        def failed(e):
+            self.nas_info.setText(error_text(e))
+            set_kind(self.nas_info, "warn")
+            relayout(self.nas_info)
+        set_kind(self.nas_info, "hint")
+        self.win.run_task(lambda _p: core.nas_ls(conn, prof["nas_share"], path, True,
+                                                 prof.get("python_modules") or "Python"),
+                          on_done=done, on_fail=failed)
 
     # resources: user edits vs automatic adjustments
     def time_edited(self, text: str):
@@ -933,7 +1154,8 @@ class NewJobPage(Page):
             self.results.setText(str(Path(d)))
 
     def default_results(self) -> str:
-        return core.default_results_base(self.data.text(), self.project.text())
+        data = self.data.text() if self.data_src.currentIndex() == 0 else ""
+        return core.default_results_base(data, self.project.text())
 
     def update_results_info(self, *_):
         base = self.results.text().strip() or self.default_results()
@@ -943,6 +1165,11 @@ class NewJobPage(Page):
             f"Each job gets its own folder: {Path(base) / (name + '_<job id>')}. Your script "
             "writes to ./results/; files are downloaded and verified when the job ends."
             if base else "")
+        if hasattr(self, "nas_res_info"):
+            nb = self.nas_results.text().strip().rstrip("/")
+            self.nas_res_info.setText(
+                f"After the job, Baobab copies the results and logs into a new folder there: "
+                f"{name}_<job id>" if nb else "Choose a folder on the NAS.")
 
     def entry_changed(self, rel: str):
         if not rel:
@@ -1155,12 +1382,23 @@ class NewJobPage(Page):
             array_range=self.array_range.text().strip() if self.array.isChecked() else "",
             array_max=self.array_max.value() if self.array.isChecked() else 0,
             email=p["email"],
-            data_dir=self.data.text(),
+            data_dir=self.data.text() if self.data_src.currentIndex() == 0 else "",
             results_base=self.results.text().strip(),
+            nas_share=p["nas_share"],
+            nas_data=self.nas_data.text().strip() if self.data_src.currentIndex() == 1 else "",
+            nas_results=(self.nas_results.text().strip()
+                         if self.res_dest.currentIndex() in (1, 2) else ""),
+            results_to_pc=self.res_dest.currentIndex() in (0, 2),
+            nas_full_verify=self.full_verify.isChecked(),
             matlab_module=p["matlab_module"],
             python_modules=p.get("python_modules") or p["python_version"],
             cuda_module=p["cuda_module"],
             continue_runs=self.cont_runs.value() if self.cont.isChecked() else 0)
+        if self.data_src.currentIndex() == 1 and not spec.nas_data:
+            raise core.BaobabError("Choose the data folder on the NAS, or switch to 'A folder on "
+                                   "this PC'.")
+        if self.res_dest.currentIndex() in (1, 2) and not spec.nas_results:
+            raise core.BaobabError("Choose the results folder on the NAS.")
         core.validate_spec(spec)
         fit, why = core.check_fit(part, core.parse_slurm_time(spec.walltime), spec.cpus,
                                   spec.mem_gb, spec.gpu)
@@ -1248,6 +1486,9 @@ class NewJobPage(Page):
                     "to install them on Baobab, so the job will probably fail.\n\n"
                     "Submit anyway?") != QMessageBox.Yes:
                 return
+        if spec.uses_nas and not self.win.nas_ok:
+            self.win.nas_login(then=self.submit)
+            return
         self.win.save_profile()
         self.logbox.clear()
         self.set_busy(True)
@@ -1331,6 +1572,25 @@ class ClusterPage(Page):
         card = self.add(Card("GPUs by type", "Free now, over all your GPU partitions."))
         self.gpu_table = self._table(["GPU type", "Good for", "Free", "Total", "Partitions"])
         card.add(self.gpu_table)
+        card = self.add(Card("Your datasets on scratch",
+                             "Data copied to Baobab (from this PC or the NAS) stays on scratch so "
+                             "later jobs start without copying it again. Scratch is shared and "
+                             "not backed up: delete what you no longer need."))
+        self.ds_info = label("", wrap=False)
+        rb2 = QPushButton("Refresh")
+        rb2.clicked.connect(self.load_datasets)
+        card.head.addWidget(self.ds_info)
+        card.head.addWidget(rb2)
+        self.ds_table = self._table(["Dataset", "Source", "Size", "Files", "Last used"])
+        self.ds_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ds_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.ds_table.setFocusPolicy(Qt.StrongFocus)
+        card.add(self.ds_table)
+        self.ds_del = QPushButton("Delete selected dataset")
+        self.ds_del.clicked.connect(self.delete_dataset)
+        card.add(row(QWidget(), self.ds_del))
+        self.datasets: list[dict] = []
+
         card = self.add(Card("Which partition should I use?"))
         guide = label(
             "<b>debug-cpu</b> - a quick test of your script, 15 minutes at most.<br>"
@@ -1362,6 +1622,53 @@ class ClusterPage(Page):
         hh.setSectionResizeMode(len(cols) - 1, QHeaderView.Stretch)
         t.setMinimumHeight(120)
         return t
+
+    def load_datasets(self):
+        if not self.win.conn.alive():
+            return
+        self.ds_info.setText("reading...")
+        conn = self.win.conn
+
+        def done(ds):
+            self.datasets = ds
+            t = self.ds_table
+            t.setRowCount(len(ds))
+            for r, d in enumerate(ds):
+                used = (time.strftime("%Y-%m-%d", time.localtime(d["last_used"]))
+                        if d.get("last_used") else "")
+                vals = [d["name"], d.get("source", ""), core.human_size(d.get("total_bytes") or 0),
+                        "" if d.get("files") is None else str(d["files"]), used]
+                for c, v in enumerate(vals):
+                    t.setItem(r, c, QTableWidgetItem(v))
+            t.setFixedHeight(t.horizontalHeader().height() + 6
+                             + sum(t.rowHeight(i) for i in range(t.rowCount())) + 2)
+            total = sum(d.get("total_bytes") or 0 for d in ds)
+            self.ds_info.setText(f"{len(ds)} dataset(s), {core.human_size(total)}")
+        self.win.run_task(lambda _p: core.list_datasets(conn), on_done=done,
+                          on_fail=lambda e: self.ds_info.setText(error_text(e)))
+
+    def delete_dataset(self):
+        rows = self.ds_table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, APP_TITLE, "Select a dataset in the list first.")
+            return
+        d = self.datasets[rows[0].row()]
+        busy = [j["job_id"] for j in self.win.registry.jobs
+                if j.get("data_remote") == d["path"] and j["state"] not in core.FINAL_STATES]
+        if busy:
+            QMessageBox.warning(self, APP_TITLE, f"This dataset is used by job(s) "
+                                f"{', '.join(busy)}, which have not finished.")
+            return
+        if QMessageBox.question(
+                self, APP_TITLE,
+                f"Delete {d['name']} ({core.human_size(d.get('total_bytes') or 0)}) from your "
+                f"scratch space on Baobab?\n\nSource: {d.get('source', '?')}\nYour original data "
+                "(on this PC or the NAS) is not touched; a later job copies it again if "
+                "needed.") != QMessageBox.Yes:
+            return
+        conn = self.win.conn
+        self.win.run_task(lambda _p: core.delete_dataset(conn, d["path"]),
+                          on_done=lambda _r: self.load_datasets())
 
     def fill(self, parts: list[dict]):
         t = self.table
@@ -1447,10 +1754,12 @@ class JobsPage(Page):
         self.b_open.clicked.connect(self.open_results)
         self.b_cancel = QPushButton("Cancel job")
         self.b_cancel.clicked.connect(self.cancel_selected)
+        self.b_nas = QPushButton("Copy results to the NAS")
+        self.b_nas.clicked.connect(self.retry_nas)
         self.b_remove = QPushButton("Remove from list")
         self.b_remove.clicked.connect(self.remove_selected)
         btns = QHBoxLayout()
-        for b in (self.b_log, self.b_dl, self.b_open, self.b_cancel):
+        for b in (self.b_log, self.b_dl, self.b_open, self.b_nas, self.b_cancel):
             btns.addWidget(b)
         btns.addStretch(1)
         btns.addWidget(self.b_remove)
@@ -1485,8 +1794,12 @@ class JobsPage(Page):
         for r, j in enumerate(jobs):
             if j["job_id"] in self.win.downloading:
                 res = "downloading..."
+            elif j.get("downloaded") and j.get("results_to_pc") is False:
+                res = {"done": "on the NAS", "failed": "NAS copy failed",
+                       "missing": "not on the NAS yet"}.get(j.get("upload_state"), "on the NAS")
             elif j.get("downloaded"):
-                res = "downloaded, verified"
+                res = "downloaded, verified" + (" + on the NAS" if j.get("upload_state") == "done"
+                                                else "")
             elif j.get("download_note"):
                 res = j["download_note"]
             elif j["state"] in core.FINAL_STATES:
@@ -1530,6 +1843,10 @@ class JobsPage(Page):
         for b in (self.b_log, self.b_dl, self.b_open, self.b_remove):
             b.setEnabled(j is not None)
         self.b_cancel.setEnabled(bool(j and j["state"] not in core.FINAL_STATES))
+        self.b_nas.setVisible(bool(j and j.get("nas_dest")))
+        self.b_nas.setEnabled(bool(j and j["state"] in core.FINAL_STATES
+                                   and j.get("upload_state") in ("failed", "missing")))
+        self.b_dl.setEnabled(bool(j and j.get("results_to_pc") is not False))
 
     def show_log(self):
         j = self.selected()
@@ -1559,6 +1876,19 @@ class JobsPage(Page):
             QMessageBox.information(self, APP_TITLE, f"Nothing downloaded yet.\n\n{p}")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+
+    def retry_nas(self):
+        j = self.selected()
+        if not j or not self.win.require_nas(self.retry_nas):
+            return
+        conn = self.win.conn
+
+        def done(uid):
+            self.win.registry.update(j["job_id"], upload_id=uid, upload_state="running",
+                                     state="UPLOADING")
+            self.refresh_table()
+            QTimer.singleShot(3_000, lambda: self.win.poll(True))
+        self.win.run_task(lambda _p: core.retry_upload(conn, j), on_done=done)
 
     def cancel_selected(self):
         j = self.selected()
@@ -1604,6 +1934,8 @@ class MainWindow(QMainWindow):
         self.downloading: set[str] = set()
         self.polling = False
         self.status_busy = False
+        self.nas_ok = False
+        self.nas_renewed = 0.0
 
         # sidebar
         side = QFrame()
@@ -1752,6 +2084,7 @@ class MainWindow(QMainWindow):
         set_kind(t.status, "ok")
         self.set_pill(True, f"{self.profile['username']} @ {hostname}")
         self.load_cluster_info()
+        self.refresh_nas_status()
         self.poll(force=True)
 
     def connect_failed(self, e):
@@ -1787,6 +2120,73 @@ class MainWindow(QMainWindow):
         set_kind(t.status, "warn")
         self.go("settings")
 
+    # lab NAS (Kerberos ticket on Baobab)
+    def show_nas_status(self, st: dict):
+        self.nas_ok = st["valid"]
+        lab = self.settings_page.nas_status
+        if st["valid"]:
+            lab.setText(f"Logged in to the NAS until {st['expires']}; renewed automatically "
+                        f"until {st['renew_until']}.")
+            set_kind(lab, "ok")
+            self.settings_page.nas_btn.setText("Log in again")
+        else:
+            lab.setText("Not logged in to the NAS. You'll be asked for your ISIS password when "
+                        "a job or the NAS browser needs it.")
+            set_kind(lab, "hint")
+            self.settings_page.nas_btn.setText("Log in to the NAS")
+
+    def refresh_nas_status(self, renew: bool = False):
+        if not self.conn.alive():
+            return
+        conn = self.conn
+
+        def work(_p):
+            if renew:
+                core.krb_renew(conn)
+            return core.krb_status(conn)
+
+        def done(st):
+            if renew:
+                self.nas_renewed = time.time()
+            self.show_nas_status(st)
+        self.run_task(work, on_done=done, on_fail=lambda e: log.warning("NAS status: %s", e))
+
+    def nas_login(self, then=None):
+        if not self.conn.alive():
+            QMessageBox.warning(self, APP_TITLE, "Connect to Baobab first.")
+            return
+        self.save_profile()
+        user = self.profile["username"]
+        pw, ok = QInputDialog.getText(
+            self, APP_TITLE,
+            f"ISIS password of {user}, to let Baobab access the lab NAS.\n"
+            "It is passed to Kerberos on Baobab and never stored.", QLineEdit.Password)
+        if not ok or not pw:
+            return
+        conn, realm = self.conn, self.profile["kerberos_realm"]
+        self.settings_page.nas_status.setText("Logging in to the NAS...")
+
+        def done(st):
+            self.nas_renewed = time.time()
+            self.show_nas_status(st)
+            if then:
+                then()
+
+        def failed(e):
+            self.show_nas_status({"valid": False})
+            QMessageBox.warning(self, APP_TITLE, error_text(e))
+        self.run_task(lambda _p: core.krb_login(conn, pw, realm), on_done=done, on_fail=failed)
+
+    def require_nas(self, retry) -> bool:
+        """True if the NAS can be used now; otherwise asks to log in, then calls retry."""
+        if not self.conn.alive():
+            QMessageBox.warning(self, APP_TITLE, "Connect to Baobab first.")
+            return False
+        if self.nas_ok:
+            return True
+        self.nas_login(then=retry)
+        return False
+
     def load_cluster_info(self):
         if not self.conn.alive():
             return
@@ -1817,6 +2217,8 @@ class MainWindow(QMainWindow):
             self.partitions = parts
             self.job_page.fill_partitions(parts)
             self.cluster_page.fill(parts)
+            if not self.cluster_page.datasets:
+                self.cluster_page.load_datasets()
 
         def failed(e):
             self.status_busy = False
@@ -1842,6 +2244,8 @@ class MainWindow(QMainWindow):
     def poll(self, force: bool = False):
         if self.polling or not self.conn.alive():
             return
+        if self.nas_ok and time.time() - self.nas_renewed > 1800:   # keep the ticket fresh
+            self.refresh_nas_status(renew=True)
         recs = [dict(j) for j in self.registry.jobs if j["state"] not in core.FINAL_STATES]
         if not recs:
             self.download_finished_jobs()
@@ -1884,6 +2288,10 @@ class MainWindow(QMainWindow):
         if not self.profile.get("auto_download", True) or not self.conn.alive():
             return
         for j in list(self.registry.jobs):
+            if j["state"] in core.FINAL_STATES and j.get("results_to_pc") is False \
+                    and not j.get("downloaded"):
+                self.registry.update(j["job_id"], downloaded=True, download_note="on the NAS")
+                continue
             if (j["state"] in core.FINAL_STATES and not j.get("downloaded")
                     and not j.get("download_note") and j["job_id"] not in self.downloading):
                 self.start_download(j["job_id"])

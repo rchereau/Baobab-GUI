@@ -20,6 +20,7 @@ Baobab GUI\
 ├── baobab.ico / .png     the app icon
 ├── baobab_app.py         the window
 ├── baobab_core.py        transfers, checksums, SLURM
+├── baobab_nas.py         NAS copies, run on Baobab by the staging and upload jobs
 ├── requirements.txt
 ├── README.md
 ├── LICENSE               MIT licence
@@ -224,6 +225,27 @@ Save checkpoints often enough that a lost run costs little, and make each step s
 
 ---
 
+## Data and results on the lab NAS
+
+Datasets of tens or hundreds of GB shouldn't travel through your PC. Baobab can read and write the lab NAS (`//nasac-m2.isis.unige.ch/m-gholtmaat`) directly, inside the UNIGE network, at about 80 MB/s, roughly 290 GB per hour.
+
+**Logging in.** The first time the app needs the NAS, it asks for your ISIS password and hands it to Kerberos on Baobab. Baobab then holds a ticket that lasts 10 hours, which the app renews automatically for up to a week. The password itself is never stored, neither on your PC nor on Baobab; the ticket is a file in your Baobab home folder that only you can read. The **Settings** page shows until when you're logged in.
+
+**Data from the NAS.** In *Data and results*, choose **A folder on the lab NAS** and pick it with **Browse NAS…**. The app shows its size and how long the first copy takes. When you submit:
+
+1. A **staging job** copies the folder to your scratch space on Baobab, without going through your PC. Your laptop can be closed.
+2. Your **job** starts once staging has succeeded. If staging fails (a file unreadable on the NAS, for example), SLURM cancels the job by itself, and the Jobs page says which file.
+3. Later jobs on the same folder **only copy new or changed files**, and files deleted from the NAS are removed from the copy.
+4. A top-level `results` folder inside the data folder is never copied as data.
+
+**Results to the NAS.** In *Results go to*, choose **This PC**, **The lab NAS** or **Both**. With the NAS, after the job an **upload job** copies the results and the logs into a new folder `<name>_<job id>` in the NAS folder you chose. The default is the `results` folder next to your data. A continuing job sends its results once, after its last run. If a copy to the NAS fails, for instance because the ticket expired while a job waited in the queue for days, select the job and click **Copy results to the NAS**.
+
+**Checks.** Each file copied from the NAS is checked against the size listed on the NAS, and its SHA-256 is recorded. Results sent to the NAS are checked against their size on the NAS. Tick **Full verification** to also re-read every file from the NAS and compare checksums. That doubles the copy time, so it's off by default.
+
+**Datasets on scratch.** The Cluster page lists the datasets copied to Baobab (from your PC or the NAS) with their size and last use. Delete those you no longer need: scratch is shared, not backed up, and deleting never touches the originals.
+
+---
+
 ## Seeing what is free
 
 The **Cluster** page shows, for every partition your account can use, the free cores, idle nodes, free GPUs and waiting jobs, plus a summary of free GPUs by type. It refreshes every 2 minutes, or with **Refresh**. The same information feeds the tiles on the New job page.
@@ -264,6 +286,8 @@ Ask only for the time and memory you need: smaller requests start sooner. After 
 | *SSH key file not found* | Wrong key path in Settings. Check with `dir %USERPROFILE%\.ssh`. |
 | *Baobab closed the connection before login* / `Connection closed by … port 22` | You're outside the UNIGE network: connect to the UNIGE VPN. Otherwise your address is banned for 15 minutes after 3 failed logins; wait without retrying. |
 | *SECURITY WARNING: … presented an unexpected identity* | The server did not prove it is Baobab. Don't force it: switch to another network, such as the UNIGE VPN or your phone's connection, and if it persists, contact the HPC team. The app has sent nothing, neither key nor data. |
+| *The NAS refused the login* | Your NAS ticket expired. Log in again (Settings → Log in to the NAS), then click **Copy results to the NAS** on the job, or resubmit. |
+| *copy from the NAS failed: not verified: …* | A file on the NAS could not be read completely, for example because of permissions or because it was being written. Fix it on the NAS and resubmit: files already copied are not copied again. |
 | *Cannot reach login1…* | No network, or the Wi-Fi blocks SSH. Try another network. |
 | *This request cannot run on …* | The tile says why: wall time over the limit, no node with that many CPUs or that much memory, or no GPU. Change the resources or pick a tile marked **Can start now** or **Will queue**. |
 | Job stuck in `PENDING` | The requested resources are busy. A shorter wall time or fewer CPUs helps. |

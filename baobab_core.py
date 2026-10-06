@@ -137,6 +137,9 @@ DEFAULT_PROFILE = {
     "python_modules": "",          # full load line, resolved from Baobab
     "cuda_module": "CUDA",
     "auto_download": True,
+    "nas_share": "//nasac-m2.isis.unige.ch/m-gholtmaat",
+    "kerberos_realm": "ISIS.UNIGE.CH",
+    "nas_last_path": "",
     "last_project": "",
     "last_data": "",
 }
@@ -815,6 +818,15 @@ class JobSpec:
     python_modules: str = "Python/3.12.3"
     cuda_module: str = "CUDA"
     continue_runs: int = 0         # >0: continue after a time-out, up to this many runs
+    nas_share: str = ""            # //server/share of the lab NAS
+    nas_data: str = ""             # data folder on the NAS (path inside the share)
+    nas_results: str = ""          # results folder on the NAS ("" = not on the NAS)
+    results_to_pc: bool = True     # download the results to this PC
+    nas_full_verify: bool = False  # re-read every copied file from the NAS
+
+    @property
+    def uses_nas(self) -> bool:
+        return bool(self.nas_data or self.nas_results)
 
     @property
     def language(self) -> str:
@@ -850,6 +862,12 @@ def validate_spec(spec: JobSpec) -> None:
         raise BaobabError("The data folder does not exist.")
     if spec.continue_runs and spec.is_array:
         raise BaobabError("Automatic continuation is not available for job arrays.")
+    if spec.nas_data and spec.data_dir:
+        raise BaobabError("Choose the data either on this PC or on the NAS, not both.")
+    if spec.uses_nas and not spec.nas_share:
+        raise BaobabError("Set the NAS share in Settings.")
+    if not spec.results_to_pc and not spec.nas_results:
+        raise BaobabError("Choose where the results should go: this PC, the NAS, or both.")
 
 
 EXIT_CONTINUE = 3        # a script exits with this code to ask for the next run
@@ -930,6 +948,11 @@ if [ "$CONTINUE" = 1 ]; then
         echo "failed $BAOBAB_RUN $status" > "$DONE"
         echo "[baobab] Stopped: the script failed (exit $status)"
     fi
+    # last run of a continuing job: send the results to the NAS (if asked)
+    if [ -f "$BAOBAB_JOB_DIR/upload.sh" ] && [ -z "$next_id" ] && [ ! -f "$BAOBAB_JOB_DIR/.baobab_upload" ]; then
+        up=$(sbatch --parsable --dependency=afterany:$SLURM_JOB_ID "$BAOBAB_JOB_DIR/upload.sh" | cut -d';' -f1)
+        [ -n "$up" ] && echo "$up" > "$BAOBAB_JOB_DIR/.baobab_upload" && echo "[baobab] Results go to the NAS with job $up"
+    fi
 fi
 """
 
@@ -992,9 +1015,16 @@ def build_sbatch(spec: JobSpec, job_dir: str, env_dir: str = "",
         L.append('export PYTHONPATH="$BAOBAB_CODE${PYTHONPATH:+:$PYTHONPATH}"')
         arg = ' "$SLURM_ARRAY_TASK_ID"' if spec.is_array else ""
         command = f'srun python -u "$BAOBAB_CODE/{spec.entry}"{arg}'
+    if spec.uses_nas:
+        L += ["# keep the NAS ticket alive while the job runs (needed to copy the results back)",
+              'export KRB5CCNAME="FILE:$HOME/.baobab_krb5cc"',
+              '( while sleep 3600; do kinit -R -c "$KRB5CCNAME" >/dev/null 2>&1; done ) &',
+              "renew_pid=$!"]
     L.append(_RUNNER.format(cont=1 if spec.continue_runs else 0,
                             max_runs=max(spec.continue_runs, 1), lead=lead,
                             command=command, code=EXIT_CONTINUE))
+    if spec.uses_nas:
+        L.append("kill $renew_pid 2>/dev/null")
     L += ['echo "Finished $(date) with exit code $status"',
           "exit $status", ""]
     return "\n".join(L)
@@ -1170,15 +1200,40 @@ def read_chain(conn: Connection, job_dir: str) -> dict:
 
 
 def poll_jobs(conn: Connection, recs: list[dict]) -> dict[str, dict]:
-    """State of each job; continuing jobs are followed from run to run."""
+    """State of each job: NAS staging, then the job itself (followed from run to run
+    when it continues), then the copy of the results to the NAS."""
+    updates: dict[str, dict] = {}
+    rest = []
+    for r in recs:                                  # 1. data still being copied from the NAS?
+        sid = r.get("stage_id")
+        if not sid or r.get("stage_done"):
+            rest.append(r)
+            continue
+        st, det = poll_states(conn, [sid]).get(sid, ("UNKNOWN", ""))
+        if st == "COMPLETED":
+            r = dict(r, stage_done=True)
+            updates[r["job_id"]] = {"stage_done": True}
+            rest.append(r)
+        elif st in FINAL_STATES:
+            err = _last_error(conn, f"{q(r['job_dir'])}/logs/stage-*.out")
+            ids = [i for i in (r["job_id"], r.get("upload_id")) if i]
+            conn.run("scancel " + " ".join(ids), check=False)
+            updates[r["job_id"]] = {"state": "FAILED", "upload_state": "none",
+                                    "detail": f"copy from the NAS failed: {err or st.lower()}"}
+        else:
+            prog = _read_progress(conn, f"{r['job_dir']}/.baobab_stage_progress.json")
+            updates[r["job_id"]] = {"state": "STAGING", "detail":
+                                    ("copying the data from the NAS: " + prog) if prog else
+                                    "copy from the NAS: " + ("starting" if st == "RUNNING"
+                                                             else "waiting for a node")}
+    recs = rest
     cur = {r["job_id"]: r.get("current_id") or r["job_id"] for r in recs}
-    states = poll_states(conn, sorted(set(cur.values())))
-    updates = {}
+    states = poll_states(conn, sorted(set(cur.values()))) if cur else {}
     for r in recs:
         jid, cid = r["job_id"], cur[r["job_id"]]
         state, detail = states.get(cid, ("UNKNOWN", ""))
         if not r.get("continue_runs"):
-            updates[jid] = {"state": state, "detail": detail}
+            updates.setdefault(jid, {}).update(state=state, detail=detail)
             continue
         chain = read_chain(conn, r["job_dir"])
         ids = chain["ids"] or [jid]
@@ -1204,8 +1259,35 @@ def poll_jobs(conn: Connection, recs: list[dict]) -> dict[str, dict]:
         else:
             detail = f"run {run} of at most {r['continue_runs']}" + (f" - {detail}" if detail else "")
         up.update(state=state, detail=detail)
-        updates[jid] = up
-    return updates
+        updates.setdefault(jid, {}).update(up)
+    # 2. results being copied to the NAS?
+    for r in recs:
+        jid = r["job_id"]
+        up = updates.setdefault(jid, {})
+        if up.get("state") not in FINAL_STATES or not r.get("nas_dest"):
+            continue
+        uid = r.get("upload_id")
+        if not uid:
+            out, _, _ = conn.run(f"cat {q(r['job_dir'])}/.baobab_upload 2>/dev/null", check=False)
+            uid = out.strip()
+        if not uid:
+            up["upload_state"] = "missing"
+            up["detail"] += " - results not sent to the NAS yet"
+            continue
+        up["upload_id"] = uid
+        ust, _ = poll_states(conn, [uid]).get(uid, ("UNKNOWN", ""))
+        if ust not in FINAL_STATES:
+            prog = _read_progress(conn, f"{r['job_dir']}/.baobab_upload_progress.json")
+            up.update(run_state=up["state"], state="UPLOADING", upload_state="running",
+                      detail=up["detail"] + " - copying the results to the NAS"
+                      + (": " + prog if prog else ""))
+        elif ust == "COMPLETED":
+            up.update(upload_state="done", detail=up["detail"] + " - results on the NAS")
+        else:
+            err = _last_error(conn, f"{q(r['job_dir'])}/upload-*.out")
+            up.update(upload_state="failed",
+                      detail=up["detail"] + f" - copy to the NAS failed: {err or ust.lower()}")
+    return {k: v for k, v in updates.items() if v}
 
 
 def cancel_job(conn: Connection, job_id: str, rec: dict | None = None):
@@ -1242,8 +1324,26 @@ def submit_job(conn: Connection, spec: JobSpec, cache: HashCache, progress=None)
                                     req.read_text(encoding="utf-8", errors="replace"), progress)
 
     # 3. data (persistent copy on scratch, unchanged files skipped)
-    data_remote = ""
-    if spec.data_dir:
+    data_remote, stage_id, tool = "", "", ""
+    if spec.uses_nas:
+        if not krb_status(conn)["valid"]:
+            raise BaobabError("Log in to the NAS first (Settings, or the prompt when submitting).")
+        krb_renew(conn)
+        tool = nas_tool(conn)
+    if spec.nas_data:
+        _phase(progress, "Measuring the data folder on the NAS...")
+        info = nas_ls(conn, spec.nas_share, spec.nas_data, True, spec.python_modules)
+        info["files"] = nas_data_files(info)
+        total = sum(f["size"] for f in info["files"])
+        data_remote = nas_dataset_dir(conn, spec.nas_share, spec.nas_data)
+        conn.run(f"mkdir -p {q(data_remote)} && ln -sfn {q(data_remote)} {q(job_dir)}/data")
+        script = build_stage_script(spec, job_dir, data_remote, tool, total)
+        stage_id = _sbatch(conn, job_dir, "stage.sh", script)
+        part, wt = stage_walltime(total, spec.nas_full_verify)
+        _log(progress, f"Data on the NAS: {len(info['files'])} file(s), {human_size(total)}. Staging "
+                       f"job {stage_id} copies them to Baobab (only new or changed files; "
+                       f"{part}, up to {wt}); the analysis starts when it has finished.")
+    elif spec.data_dir:
         data_remote = remote_data_dir(conn, spec.data_dir)
         rep = upload_tree(conn, spec.data_dir, data_remote, kind="data", skip_unchanged=True,
                           cache=cache, progress=progress, label="Data")
@@ -1251,23 +1351,35 @@ def submit_job(conn: Connection, spec: JobSpec, cache: HashCache, progress=None)
         if not rep.ok:
             raise BaobabError("Data upload could not be verified - job not submitted.")
         conn.run(f"ln -sfn {q(data_remote)} {q(job_dir)}/data")
+        files = list_local_files(spec.data_dir, "data")
+        write_dataset_info(conn, data_remote, f"PC: {Path(spec.data_dir).name}",
+                           sum(s for _, _, s in files), len(files))
     else:
         conn.run(f"mkdir -p {q(job_dir)}/data")
 
-    # 4. sbatch script + submission
+    # 4. sbatch script + submission (after the staging job, if any)
     _phase(progress, "Submitting to SLURM...")
     is_fn = spec.language != "matlab" or is_matlab_function(project / spec.entry)
     script = build_sbatch(spec, job_dir, env_dir, is_fn)
-    sftp = conn.sftp()
-    try:
-        with sftp.open(f"{job_dir}/submit.sh", "w") as f:
-            f.write(script)
-    finally:
-        sftp.close()
-    out, _, _ = conn.run(f"cd {q(job_dir)} && sbatch --parsable submit.sh")
-    job_id = out.strip().split(";")[0]
-    if not job_id.isdigit():
-        raise BaobabError(f"Unexpected answer from sbatch: {out.strip()}")
+    job_id = _sbatch(conn, job_dir, "submit.sh", script, f"afterok:{stage_id}" if stage_id else "")
+
+    # 5. results to the NAS: after the job (a continuing job sends them after its last run)
+    upload_id, nas_dest = "", ""
+    if spec.nas_results:
+        nas_dest = f"{spec.nas_results.rstrip('/')}/{spec.name}_{job_id}"
+        conn.run(f"printf '%s' {q(nas_dest)} > {q(job_dir)}/.baobab_nas_dest")
+        up = build_upload_script(spec, job_dir, tool)
+        if spec.continue_runs:
+            sftp = conn.sftp()
+            try:
+                with sftp.open(f"{job_dir}/upload.sh", "w") as f:
+                    f.write(up)
+            finally:
+                sftp.close()
+        else:
+            upload_id = _sbatch(conn, job_dir, "upload.sh", up, f"afterany:{job_id}")
+            conn.run(f"echo {upload_id} > {q(job_dir)}/.baobab_upload")
+        _log(progress, f"Results will be copied to the NAS: {nas_dest}")
 
     results_base = spec.results_base or default_results_base(spec.data_dir, spec.project_dir)
     rec = {"job_id": job_id, "name": spec.name, "job_dir": job_dir,
@@ -1275,6 +1387,8 @@ def submit_job(conn: Connection, spec: JobSpec, cache: HashCache, progress=None)
            "project_dir": spec.project_dir, "cpus": spec.cpus, "mem_gb": spec.mem_gb,
            "walltime": spec.walltime, "continue_runs": spec.continue_runs,
            "current_id": job_id, "run": 1, "chain_ids": [job_id],
+           "stage_id": stage_id, "upload_id": upload_id, "nas_dest": nas_dest,
+           "nas_data": spec.nas_data, "results_to_pc": spec.results_to_pc,
            "is_array": spec.is_array,
            "results_local": str(Path(results_base) / f"{spec.name}_{job_id}"),
            "submitted": time.strftime("%Y-%m-%d %H:%M"), "state": "PENDING",
@@ -1566,3 +1680,249 @@ def format_walltime(sec: int) -> str:
     if m == 60:
         h, m = h + 1, 0
     return f"{d}-{h:02d}:{m:02d}:00" if d else f"{h:02d}:{m:02d}:00"
+
+
+
+# ── Lab NAS: Kerberos ticket ──────────────────────────────────────────────────
+KRB_CC = "$HOME/.baobab_krb5cc"          # on Baobab: readable by the user only
+NAS_ENV = f'export KRB5CCNAME="FILE:{KRB_CC}"; '
+
+
+def krb_status(conn: Connection) -> dict:
+    """{'valid': bool, 'expires': str, 'renew_until': str} for the saved NAS ticket."""
+    out, _, code = conn.run(f'{NAS_ENV}klist -s && klist; echo "__rc=$?"', check=False)
+    valid = "__rc=0" in out and "krbtgt/" in out
+    m = re.search(r"\S+ \S+\s+(\S+ \S+)\s+krbtgt/", out)
+    r = re.search(r"renew until (\S+ \S+)", out)
+    return {"valid": valid, "expires": m.group(1) if m else "", "renew_until": r.group(1) if r else ""}
+
+
+def krb_renew(conn: Connection) -> bool:
+    """Extend a valid ticket (possible for up to a week without the password)."""
+    _, _, code = conn.run(f'{NAS_ENV}kinit -R -c "$KRB5CCNAME"', check=False)
+    return code == 0
+
+
+def krb_login(conn: Connection, password: str, realm: str) -> dict:
+    """Get a NAS ticket with the ISIS password, typed into kinit's own prompt (the
+    password is never written to a file or a command line)."""
+    conn.ensure()
+    principal = f"{conn.profile['username']}@{realm}"
+    chan = conn.client.get_transport().open_session()
+    chan.settimeout(30)
+    chan.get_pty()
+    chan.exec_command(f'{NAS_ENV}kinit -c "$KRB5CCNAME" {q(principal)}; echo "__rc=$?"')
+    buf, sent, t0 = b"", False, time.time()
+    try:
+        while time.time() - t0 < 30:
+            if chan.recv_ready():
+                buf += chan.recv(4096)
+                if not sent and b"assword" in buf:
+                    chan.send(password + "\n")
+                    sent = True
+                if b"__rc=" in buf:
+                    break
+            elif chan.exit_status_ready():
+                break
+            else:
+                time.sleep(0.05)
+    finally:
+        chan.close()
+    text = buf.decode("utf-8", "replace")
+    if "__rc=0" not in text:
+        if "incorrect" in text.lower():
+            raise BaobabError("Wrong password for the NAS. Careful: several wrong passwords in a "
+                              "row can lock your UNIGE account.")
+        if "KDC" in text or "realm" in text.lower():
+            raise BaobabError(f"Kerberos could not find the realm {realm}: check it in Settings.")
+        raise BaobabError("NAS login failed: " + text.strip().splitlines()[-1][-200:])
+    conn.run(f"chmod 600 {KRB_CC}", check=False)
+    return krb_status(conn)
+
+
+# ── Lab NAS: helper on Baobab, browsing ───────────────────────────────────────
+NAS_TOOL_LOCAL = Path(__file__).resolve().parent / "baobab_nas.py"
+
+
+def nas_tool(conn: Connection) -> str:
+    """Path of baobab_nas.py on Baobab; uploaded (again) when it changed."""
+    remote = f"{conn.scratch}/baobab_tools/baobab_nas.py"
+    want = sha256_file(NAS_TOOL_LOCAL)
+    out, _, _ = conn.run(f"sha256sum {q(remote)} 2>/dev/null", check=False)
+    if not out.startswith(want):
+        conn.run(f"mkdir -p {q(conn.scratch)}/baobab_tools")
+        sftp = conn.sftp()
+        try:
+            sftp.put(str(NAS_TOOL_LOCAL), remote)
+        finally:
+            sftp.close()
+    return remote
+
+
+def _python_prefix(python_modules: str) -> str:
+    """Shell lines setting $PY to a python3 (system one, else the module)."""
+    return ('PY=$(command -v python3 || true); '
+            f'if [ -z "$PY" ]; then module load {python_modules} >/dev/null 2>&1; '
+            'PY=$(command -v python3); fi; ')
+
+
+def nas_ls(conn: Connection, share: str, path: str, recursive: bool = False,
+           python_modules: str = "Python") -> dict:
+    tool = nas_tool(conn)
+    cmd = (NAS_ENV + _python_prefix(python_modules) +
+           f'"$PY" {q(tool)} ls --share {q(share)} --path {q(path)}'
+           + (" --recursive" if recursive else ""))
+    out, err, code = conn.run_login(cmd, timeout=None, check=False)
+    if code != 0:
+        msg = next((l[7:] for l in out.splitlines() if l.startswith("error: ")), "") or err.strip()
+        raise BaobabError(msg or "Could not list the NAS folder.")
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def nas_data_files(listing: dict) -> list[dict]:
+    """Files of a recursive NAS listing that count as data (as staging copies them):
+    a top-level "results" folder holds results of earlier jobs and is skipped."""
+    return [f for f in listing["files"] if f["name"].split("/")[0].lower() != RESULTS_DIRNAME]
+
+
+def nas_dataset_dir(conn: Connection, share: str, path: str) -> str:
+    tag = hashlib.sha1(f"{share}/{path}".lower().encode()).hexdigest()[:8]
+    name = safe_name(path.rstrip("/").split("/")[-1] or "nas", "nas")
+    return f"{conn.scratch}/baobab_data/nas_{name}_{tag}"
+
+
+def stage_walltime(total_bytes: int, full: bool) -> tuple[str, str]:
+    """(partition, wall time) for copying this much data from the NAS (~80 MB/s measured;
+    planned at 40 MB/s, x2 with full verification, +15 min)."""
+    sec = 900 + total_bytes / (40 * 1024 ** 2) * (2 if full else 1)
+    if sec <= 12 * 3600:
+        return "shared-cpu", format_walltime(sec)
+    return "public-cpu", format_walltime(min(sec, 4 * 86400))
+
+
+def _transfer_script(name: str, job_dir: str, partition: str, walltime: str, log: str,
+                     python_modules: str, body: str) -> str:
+    return "\n".join([
+        "#!/bin/bash",
+        f"#SBATCH --job-name={name}",
+        f"#SBATCH --partition={partition}",
+        f"#SBATCH --time={walltime}",
+        "#SBATCH --ntasks=1",
+        "#SBATCH --cpus-per-task=2",
+        "#SBATCH --mem=4G",
+        f"#SBATCH --output={log}",
+        "",
+        NAS_ENV.strip(),
+        'kinit -R -c "$KRB5CCNAME" >/dev/null 2>&1    # extend the ticket while it is valid',
+        _python_prefix(python_modules),
+        f"cd {q(job_dir)}",
+        body,
+        'echo "Finished $(date) with exit code $status"',
+        "exit $status", ""])
+
+
+def build_stage_script(spec: JobSpec, job_dir: str, dataset: str, tool: str,
+                       total_bytes: int) -> str:
+    partition, walltime = stage_walltime(total_bytes, spec.nas_full_verify)
+    body = "\n".join([
+        f'echo "Copying {spec.nas_data} from the NAS to {dataset} - $(date)"',
+        f'"$PY" {q(tool)} pull --share {q(spec.nas_share)} --path {q(spec.nas_data)} '
+        f'--dest {q(dataset)}' + (" --full" if spec.nas_full_verify else "") +
+        f' --progress-file {q(job_dir)}/.baobab_stage_progress.json',
+        "status=$?"])
+    return _transfer_script(f"{spec.name}-stage", job_dir, partition, walltime,
+                            f"{job_dir}/logs/stage-%j.out", spec.python_modules, body)
+
+
+def build_upload_script(spec: JobSpec, job_dir: str, tool: str) -> str:
+    full = " --full" if spec.nas_full_verify else ""
+    body = "\n".join([
+        f'DEST=$(cat {q(job_dir)}/.baobab_nas_dest)',
+        'echo "Copying the results to the NAS: $DEST - $(date)"',
+        f'"$PY" {q(tool)} push --share {q(spec.nas_share)} --path "$DEST" --src results{full} '
+        f'--progress-file {q(job_dir)}/.baobab_upload_progress.json',
+        "status=$?",
+        "cp submit.sh logs/ 2>/dev/null",
+        f'"$PY" {q(tool)} push --share {q(spec.nas_share)} --path "$DEST/_logs" --src logs || '
+        "status=$((status ? status : 1))"])
+    return _transfer_script(f"{spec.name}-upload", job_dir, "shared-cpu", "06:00:00",
+                            f"{job_dir}/upload-%j.out", spec.python_modules, body)
+
+
+def _sbatch(conn: Connection, job_dir: str, script_name: str, text: str, deps: str = "") -> str:
+    sftp = conn.sftp()
+    try:
+        with sftp.open(f"{job_dir}/{script_name}", "w") as f:
+            f.write(text)
+    finally:
+        sftp.close()
+    dep = f" --dependency={deps} --kill-on-invalid-dep=yes" if deps else ""
+    out, _, _ = conn.run(f"cd {q(job_dir)} && sbatch --parsable{dep} {script_name}")
+    jid = out.strip().split(";")[0]
+    if not jid.isdigit():
+        raise BaobabError(f"Unexpected answer from sbatch: {out.strip()}")
+    return jid
+
+
+def retry_upload(conn: Connection, rec: dict) -> str:
+    """Copy a finished job's results to the NAS again (e.g. after the ticket expired)."""
+    out, _, _ = conn.run(f"cd {q(rec['job_dir'])} && sbatch --parsable upload.sh")
+    jid = out.strip().split(";")[0]
+    conn.run(f"echo {jid} > {q(rec['job_dir'])}/.baobab_upload", check=False)
+    return jid
+
+
+def _read_progress(conn: Connection, path: str) -> str:
+    out, _, _ = conn.run(f"cat {q(path)} 2>/dev/null", check=False)
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return ""
+    pct = 100 * d["bytes"] / max(d["total_bytes"], 1)
+    left = f", about {human_duration(int(d['left_s']))} left" if d.get("left_s", 0) > 60 else ""
+    return (f"{pct:.0f}% ({human_size(d['bytes'])} of {human_size(d['total_bytes'])}, "
+            f"{d['files']}/{d['total_files']} files{left})")
+
+
+def _last_error(conn: Connection, pattern: str) -> str:
+    out, _, _ = conn.run(f"cat {pattern} 2>/dev/null | grep -E '^error: ' | tail -1", check=False)
+    return out.strip()[7:] if out.strip() else ""
+
+
+# ── Datasets on scratch ───────────────────────────────────────────────────────
+INFO_FILE = ".baobab_info.json"
+
+
+def write_dataset_info(conn: Connection, dataset: str, source: str, total_bytes: int, files: int):
+    info = json.dumps({"source": source, "total_bytes": total_bytes, "files": files,
+                       "last_used": time.time(), "complete": True})
+    conn.run(f"cat > {q(dataset)}/{INFO_FILE}", stdin_data=info.encode(), check=False)
+
+
+def list_datasets(conn: Connection) -> list[dict]:
+    base = f"{conn.scratch}/baobab_data"
+    out, _, _ = conn.run(f'for d in {q(base)}/*/; do [ -d "$d" ] || continue; echo "##$d"; '
+                         f'cat "$d/{INFO_FILE}" 2>/dev/null || du -sb "$d" | cut -f1; echo; done',
+                         timeout=None, check=False)
+    res = []
+    for block in out.split("##")[1:]:
+        path, _, rest = block.partition("\n")
+        rest = rest.strip()
+        try:
+            info = json.loads(rest)
+        except ValueError:
+            info = None
+        if not isinstance(info, dict):          # no summary file: size from du
+            info = {"source": "unknown", "total_bytes": int(rest) if rest.isdigit() else 0,
+                    "files": None, "last_used": None}
+        info["path"] = path.rstrip("/")
+        info["name"] = info["path"].rsplit("/", 1)[-1]
+        res.append(info)
+    return sorted(res, key=lambda d: -(d.get("last_used") or 0))
+
+
+def delete_dataset(conn: Connection, path: str):
+    base = f"{conn.scratch}/baobab_data/"
+    if not path.startswith(base) or ".." in path or path.rstrip("/") == base.rstrip("/"):
+        raise BaobabError("Refusing to delete a folder outside your datasets.")
+    conn.run(f"rm -rf {q(path)}", timeout=None)
