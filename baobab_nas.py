@@ -70,6 +70,11 @@ def explain(err: str) -> str:
     err = "\n".join(l for l in err.splitlines() if l.strip()).strip()
     if "NT_STATUS_OBJECT_NAME_NOT_FOUND" in err or "NT_STATUS_OBJECT_PATH_NOT_FOUND" in err:
         return "Folder or file not found on the NAS: " + err.splitlines()[-1]
+    if any(w in err for w in ("NT_STATUS_CONNECTION_REFUSED", "NT_STATUS_HOST_UNREACHABLE",
+                              "NT_STATUS_IO_TIMEOUT", "NT_STATUS_UNSUCCESSFUL",
+                              "NT_STATUS_BAD_NETWORK_NAME", "Name or service not known")):
+        return ("Baobab cannot reach the NAS share. Check the share address in Settings; if it "
+                "is right, the NAS may be down. (" + err.splitlines()[-1] + ")")
     if "NT_STATUS_ACCESS_DENIED" in err:
         return "Access denied on the NAS (no permission for this folder)."
     if "Kerberos" in err or "NT_STATUS_LOGON_FAILURE" in err or "krb5" in err.lower() \

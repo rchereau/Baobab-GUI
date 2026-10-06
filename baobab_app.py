@@ -1554,6 +1554,145 @@ def show_progress(d: dict, phase: QLabel, bar: QProgressBar, file_label: QLabel)
         file_label.setText("")
 
 
+# ── Page: interactive sessions ────────────────────────────────────────────────
+class CopyRow(QWidget):
+    """A read-only text with a Copy button."""
+
+    def __init__(self, text: str = ""):
+        super().__init__()
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        self.edit = QLineEdit(text)
+        self.edit.setReadOnly(True)
+        self.edit.setFont(mono_font())
+        self.btn = QPushButton("Copy")
+        self.btn.clicked.connect(self.copy)
+        h.addWidget(self.edit, 1)
+        h.addWidget(self.btn)
+
+    def set(self, text: str):
+        self.edit.setText(text)
+        self.edit.setCursorPosition(0)
+
+    def copy(self):
+        QApplication.clipboard().setText(self.edit.text())
+        self.btn.setText("Copied")
+        QTimer.singleShot(1500, lambda: self.btn.setText("Copy"))
+
+
+class InteractivePage(Page):
+    def __init__(self, win: "MainWindow"):
+        super().__init__("Interactive session",
+                         "A Linux desktop on a compute node, in your browser, for work that needs "
+                         "a graphical interface: MATLAB's editor and figures, image viewers... It "
+                         "runs while you use it, unlike the jobs submitted from New job.")
+        self.win = win
+        self.info: dict = {}
+
+        card = self.add(Card("Remote desktop on Baobab (Open OnDemand)"))
+        self.open_btn = QPushButton("Open the remote desktop")
+        self.open_btn.setObjectName("primary")
+        self.open_btn.clicked.connect(self.open_ood)
+        card.add(row(hint("Opens Open OnDemand in your browser. Log in with your UNIGE account; "
+                          "from home, connect to the UNIGE VPN first."), self.open_btn))
+        self.url = QLineEdit(win.profile.get("ood_url") or core.DEFAULT_PROFILE["ood_url"])
+        self.url.editingFinished.connect(self.save_url)
+        card.add(row(QLabel("Address"), self.url, stretch_first=False))
+        card.body.itemAt(card.body.count() - 1).layout().setStretch(1, 1)
+
+        card = self.add(Card("Start a session", number="1"))
+        steps = label(
+            "<ol style='margin-left:-20px'>"
+            "<li>In Open OnDemand, open <b>Interactive Apps &rarr; Desktop</b>.</li>"
+            "<li>Desktop environment: <b>XFCE</b>, lighter and more reliable than GNOME.</li>"
+            "<li>Partition: <b>public-interactive-cpu</b> for up to 8 hours and 6 cores; "
+            "<b>shared-cpu</b> (12 h) or <b>public-cpu</b> (4 days) for more.</li>"
+            "<li>Hours, cores and memory: ask for what you need. The session ends at its time "
+            "limit, so save your work before.</li>"
+            "<li><b>Launch</b>, wait until the session is <i>Running</i>, then click "
+            "<b>Launch Desktop</b>.</li>"
+            "<li>When you're done, <b>Delete</b> the session in Open OnDemand to free the node.</li>"
+            "</ol>")
+        steps.setTextFormat(Qt.RichText)
+        steps.setStyleSheet(f"color: {C['text']};")
+        card.add(steps)
+
+        card = self.add(Card("MATLAB with its interface", number="2"))
+        card.add(label("In the desktop, open a terminal (right-click on the desktop, "
+                       "<i>Open Terminal Here</i>) and run:"))
+        self.matlab_cmd = CopyRow()
+        card.add(self.matlab_cmd)
+        card.add(label("-softwareopengl draws MATLAB's graphics without the node's graphics card, "
+                       "which avoids blank or crashing windows in a remote desktop."))
+
+        card = self.add(Card("Your files in the session", number="3"))
+        card.add(QLabel("<b>Your scratch space</b>, with the jobs and datasets of this app:"))
+        self.scratch_row = CopyRow()
+        card.add(self.scratch_row)
+        self.jobs_label = QLabel("<b>Results of your latest jobs</b>, to open them without "
+                                 "downloading anything:")
+        card.add(self.jobs_label)
+        self.job_rows = [CopyRow() for _ in range(3)]
+        for r_ in self.job_rows:
+            card.add(r_)
+        card.add(QLabel("<b>The lab NAS</b>: in the file manager, type this in the address bar "
+                        "(log in with your ISIS account if asked):"))
+        self.smb_row = CopyRow()
+        card.add(self.smb_row)
+        card.add(label("MATLAB can't open smb:// addresses. Once the share is open in the file "
+                       "manager, MATLAB reaches the same folder through this Linux path, which "
+                       "exists only during that session:"))
+        self.gvfs_row = CopyRow()
+        card.add(self.gvfs_row)
+        self.gvfs_example = label("")
+        card.add(self.gvfs_example)
+        self.finish()
+        self.refresh()
+
+    def save_url(self):
+        self.win.profile["ood_url"] = self.url.text().strip() or core.DEFAULT_PROFILE["ood_url"]
+        self.win.save_profile()
+
+    def open_ood(self):
+        self.save_url()
+        QDesktopServices.openUrl(QUrl(self.win.profile["ood_url"]))
+
+    def refresh(self):
+        p = self.win.profile
+        self.matlab_cmd.set(f"module load {p['matlab_module']} && matlab -softwareopengl")
+        scratch = self.info.get("scratch") or self.win.conn.scratch
+        self.scratch_row.set(scratch or "(connect to Baobab to see your path)")
+        jobs = [j for j in self.win.registry.jobs if j.get("job_dir")][:3]
+        self.jobs_label.setVisible(bool(jobs))
+        for r_, j in zip(self.job_rows, jobs + [None] * 3):
+            r_.setVisible(j is not None)
+            if j:
+                r_.set(f"{j['job_dir']}/results")
+                r_.edit.setToolTip(f"Job {j['job_id']} - {j['name']} ({j['state']})")
+        where = (p.get("nas_last_path") or "").strip("/")
+        self.smb_row.set(core.smb_url(p["nas_share"], where))
+        uid = self.info.get("uid")
+        if uid:
+            path = core.gvfs_path(uid, p["nas_share"], where)
+            self.gvfs_row.set(path)
+            self.gvfs_example.setText(f"In MATLAB: cd('{path}')")
+        else:
+            self.gvfs_row.set("(connect to Baobab to compute your path)")
+            self.gvfs_example.setText("")
+
+    def load_info(self):
+        if not self.win.conn.alive():
+            return
+        conn = self.win.conn
+
+        def done(info):
+            self.info = info
+            self.refresh()
+        self.win.run_task(lambda _p: core.session_info(conn), on_done=done,
+                          on_fail=lambda e: log.warning("session info: %s", e))
+
+
 # ── Page: cluster ─────────────────────────────────────────────────────────────
 class ClusterPage(Page):
     def __init__(self, win: "MainWindow"):
@@ -1969,13 +2108,15 @@ class MainWindow(QMainWindow):
         self.job_page = NewJobPage(self)
         self.cluster_page = ClusterPage(self)
         self.jobs_page = JobsPage(self)
+        self.interactive_page = InteractivePage(self)
         self.pages = {"new": self.job_page, "jobs": self.jobs_page,
-                      "cluster": self.cluster_page, "settings": self.settings_page}
+                      "cluster": self.cluster_page, "interactive": self.interactive_page,
+                      "settings": self.settings_page}
         self.nav: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
         for key, text in (("new", "New job"), ("jobs", "Jobs"), ("cluster", "Cluster"),
-                          ("settings", "Settings")):
+                          ("interactive", "Interactive"), ("settings", "Settings")):
             self.stack.addWidget(self.pages[key])
             b = QPushButton(text)
             b.setObjectName("nav")
@@ -2021,6 +2162,8 @@ class MainWindow(QMainWindow):
             self.go("settings")
 
     def go(self, key: str):
+        if key == "interactive":
+            self.interactive_page.refresh()
         self.stack.setCurrentWidget(self.pages[key])
         self.nav[key].setChecked(True)
 
@@ -2085,6 +2228,7 @@ class MainWindow(QMainWindow):
         self.set_pill(True, f"{self.profile['username']} @ {hostname}")
         self.load_cluster_info()
         self.refresh_nas_status()
+        self.interactive_page.load_info()
         self.poll(force=True)
 
     def connect_failed(self, e):

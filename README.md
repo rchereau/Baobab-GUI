@@ -246,6 +246,20 @@ Datasets of tens or hundreds of GB shouldn't travel through your PC. Baobab can 
 
 ---
 
+## Interactive sessions (remote desktop)
+
+For work that needs a graphical interface (MATLAB's editor and figures, image viewers…), Baobab offers a Linux desktop in your browser through **Open OnDemand**. The **Interactive** page of the app helps you use it:
+
+- **Open the remote desktop** opens Open OnDemand. Log in with your UNIGE account, with the VPN on from home.
+- **The steps:** Interactive Apps → Desktop, **XFCE** rather than GNOME, partition **public-interactive-cpu** (up to 8 h and 6 cores) or **shared-cpu** / **public-cpu** for more. When you're done, delete the session so its node is freed.
+- **MATLAB with its interface:** in the desktop, open a terminal and paste the command shown, `module load MATLAB/… && matlab -softwareopengl`. The `-softwareopengl` option avoids blank or crashing windows in a remote desktop.
+- **Your files,** each with a Copy button:
+  - your **scratch space** and the **results folders of your latest jobs**, which the session can open directly, without downloading anything;
+  - the **lab NAS**: the `smb://` address to type in the desktop's file manager;
+  - the Linux path MATLAB needs to reach the same folder, like `/run/user/<your number>/gvfs/smb-share:server=…`. The app computes it for your account. It only exists while the share is open in the file manager.
+
+---
+
 ## Seeing what is free
 
 The **Cluster** page shows, for every partition your account can use, the free cores, idle nodes, free GPUs and waiting jobs, plus a summary of free GPUs by type. It refreshes every 2 minutes, or with **Refresh**. The same information feeds the tiles on the New job page.

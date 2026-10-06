@@ -140,6 +140,7 @@ DEFAULT_PROFILE = {
     "nas_share": "//nasac-m2.isis.unige.ch/m-gholtmaat",
     "kerberos_realm": "ISIS.UNIGE.CH",
     "nas_last_path": "",
+    "ood_url": "https://openondemand.baobab.hpc.unige.ch/pun/sys/dashboard",
     "last_project": "",
     "last_data": "",
 }
@@ -1926,3 +1927,25 @@ def delete_dataset(conn: Connection, path: str):
     if not path.startswith(base) or ".." in path or path.rstrip("/") == base.rstrip("/"):
         raise BaobabError("Refusing to delete a folder outside your datasets.")
     conn.run(f"rm -rf {q(path)}", timeout=None)
+
+
+
+# ── Interactive sessions (Open OnDemand) ──────────────────────────────────────
+def session_info(conn: Connection) -> dict:
+    """What an interactive desktop session needs to know about this account."""
+    out, _, _ = conn.run('id -u; echo "$HOME"', check=False)
+    lines = out.split()
+    return {"uid": lines[0] if lines else "", "home": lines[1] if len(lines) > 1 else "",
+            "scratch": conn.scratch}
+
+
+def smb_url(share: str, path: str = "") -> str:
+    """//host/share + path -> smb://host/share/path (for a file manager's address bar)."""
+    return "smb:" + share.rstrip("/") + ("/" + path.strip("/") if path.strip("/") else "") + "/"
+
+
+def gvfs_path(uid: str, share: str, path: str = "") -> str:
+    """Linux path of an SMB share opened in the desktop's file manager (GVfs)."""
+    host, _, name = share.strip("/").partition("/")
+    base = f"/run/user/{uid}/gvfs/smb-share:server={host.lower()},share={name.lower()}"
+    return base + ("/" + path.strip("/") if path.strip("/") else "")
