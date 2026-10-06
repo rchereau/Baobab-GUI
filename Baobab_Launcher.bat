@@ -5,7 +5,6 @@ cd /d "%~dp0"
 
 set "VENV=%~dp0.venv"
 set "VPY=%VENV%\Scripts\python.exe"
-<<<<<<< Updated upstream
 set "VPYW=%VENV%\Scripts\pythonw.exe"
 set "KEY=%USERPROFILE%\.ssh\id_rsa"
 
@@ -59,51 +58,6 @@ echo.
 if errorlevel 1 goto :pip_fail
 echo.
 echo [Setup] Done.
-=======
-set "KEY=%USERPROFILE%\.ssh\id_rsa"
-
-echo ==========================================================
-echo    Baobab HPC Pipeline - launcher
-echo ==========================================================
-echo.
-
-rem ---------------------------------------------------------------
-rem 1. Server already running? Just open the browser.
-rem ---------------------------------------------------------------
-powershell -NoProfile -Command "try{(New-Object Net.Sockets.TcpClient('127.0.0.1',5000)).Close();exit 0}catch{exit 1}" >nul 2>&1
-if not errorlevel 1 goto :already_running
-
-rem ---------------------------------------------------------------
-rem 2. Private environment already set up? Skip to dependency check.
-rem ---------------------------------------------------------------
-if exist "%VPY%" goto :check_deps
-
-rem ---------------------------------------------------------------
-rem 3. First run: find Python
-rem ---------------------------------------------------------------
-set "PYEXE="
-py -3 --version >nul 2>&1
-if not errorlevel 1 set "PYEXE=py -3"
-if defined PYEXE goto :make_venv
-python --version >nul 2>&1
-if not errorlevel 1 set "PYEXE=python"
-if defined PYEXE goto :make_venv
-goto :install_python
-
-:make_venv
-echo [First run] Creating a private Python environment in .venv ...
-%PYEXE% -m venv "%VENV%"
-if errorlevel 1 goto :venv_fail
-
-:check_deps
-"%VPY%" -c "import flask, paramiko" >nul 2>&1
-if not errorlevel 1 goto :check_key
-echo [Setup] Installing dependencies - this only happens once ...
-"%VPY%" -m pip install --upgrade pip --quiet
-"%VPY%" -m pip install -r "%~dp0requirements.txt" --quiet
-if errorlevel 1 goto :pip_fail
-echo [Setup] Dependencies installed.
->>>>>>> Stashed changes
 echo.
 
 rem ---------------------------------------------------------------
@@ -111,7 +65,6 @@ rem 4. SSH key present? Offer to create one.
 rem ---------------------------------------------------------------
 :check_key
 if exist "%KEY%" goto :launch
-<<<<<<< Updated upstream
 if exist "%USERPROFILE%\.ssh\id_ed25519" goto :launch
 echo No SSH key found at %KEY%
 echo Baobab only accepts SSH-key logins, so you need one.
@@ -123,21 +76,11 @@ echo  my-account.unige.ch keeps only ONE key: registering a new one
 echo  REPLACES the old one, and the other computer loses its access.
 echo.
 choice /C YN /M "Generate a NEW SSH key now"
-=======
-echo No SSH key found at %KEY%
-echo Baobab only accepts SSH-key logins, so you need one.
-echo.
-choice /C YN /M "Generate an SSH key now"
->>>>>>> Stashed changes
 if errorlevel 2 goto :launch
 if not exist "%USERPROFILE%\.ssh" mkdir "%USERPROFILE%\.ssh"
 echo.
 echo You will be asked for a passphrase. Press Enter twice for none,
-<<<<<<< Updated upstream
 echo or choose one - the app will then ask for it at start-up.
-=======
-echo or choose one and enter it later in the app.
->>>>>>> Stashed changes
 echo.
 ssh-keygen -t rsa -b 4096 -f "%KEY%"
 if errorlevel 1 goto :keygen_fail
@@ -154,7 +97,6 @@ echo.
 pause
 
 rem ---------------------------------------------------------------
-<<<<<<< Updated upstream
 rem 5. Check the app loads, then start it without a console window
 rem ---------------------------------------------------------------
 :launch
@@ -246,31 +188,6 @@ goto :ask_python
 
 :install_python
 winget --version >nul 2>&1
-=======
-rem 5. Launch the server - it opens the browser by itself
-rem ---------------------------------------------------------------
-:launch
-echo.
-echo Starting Baobab HPC ... the app opens in your browser.
-echo Keep this window open while you use the app.
-echo Close it or press Ctrl+C to stop.
-echo.
-"%VPY%" "%~dp0baobab_server.py"
-echo.
-echo Server stopped.
-pause
-exit /b 0
-
-:already_running
-echo The app is already running - opening it in your browser.
-start "" http://localhost:5000
-timeout /t 3 >nul
-exit /b 0
-
-:install_python
-echo Python 3 was not found on this computer.
-where winget >nul 2>&1
->>>>>>> Stashed changes
 if errorlevel 1 goto :no_winget
 echo Installing Python 3.12 with winget ...
 winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
@@ -289,16 +206,11 @@ exit /b 1
 
 :venv_fail
 echo ERROR: could not create the Python environment.
-<<<<<<< Updated upstream
 echo Delete the .venv folder and run the launcher again.
-=======
-echo Try deleting the .venv folder and running the launcher again.
->>>>>>> Stashed changes
 pause
 exit /b 1
 
 :pip_fail
-<<<<<<< Updated upstream
 rem Built with a 32-bit or too-new Python? Rebuild once with another one.
 if defined REBUILT goto :pip_fail_msg
 "%VPY%" -c "import sys, struct; sys.exit(0 if struct.calcsize('P') == 8 and sys.version_info < (3, 14) else 1)" >nul 2>&1
@@ -326,10 +238,6 @@ echo    suitable, install 64-bit Python 3.12 from python.org.
 echo  - Network errors: check your internet connection and retry.
 echo.
 echo The messages above show pip's exact error.
-=======
-echo ERROR: dependency installation failed.
-echo Check your internet connection, delete the .venv folder, and retry.
->>>>>>> Stashed changes
 pause
 exit /b 1
 

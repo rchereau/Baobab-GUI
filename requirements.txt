@@ -1,6 +1,2 @@
-<<<<<<< Updated upstream
 PySide6>=6.5
-=======
-flask>=2.2
->>>>>>> Stashed changes
 paramiko>=3.0
