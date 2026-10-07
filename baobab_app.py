@@ -1,5 +1,5 @@
 """
-Baobab HPC — desktop app (PySide6).
+HPC Forest — desktop app (PySide6).
 
 Submit MATLAB / Python jobs to the UNIGE Baobab cluster, with checksummed
 transfers of code, data and results. Start it with Baobab_Launcher.bat.
@@ -31,7 +31,7 @@ def native_error_box(text: str):
         pass
     if os.name == "nt":
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, text[-3000:], "Baobab HPC - error", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, text[-3000:], "HPC Forest - error", 0x10)
     else:
         print(text, file=sys.stderr)
 
@@ -41,13 +41,14 @@ import logging.handlers                                # noqa: E402
 import time                                            # noqa: E402
 import traceback                                       # noqa: E402
 
-from PySide6.QtCore import (QLockFile, QObject, QPointF, QRunnable, QSize, QThreadPool, QTime,  # noqa: E402
+from PySide6.QtCore import (QLockFile, QObject, QPoint, QPointF, QRect, QRunnable, QSize,  # noqa: E402
+                            QThreadPool, QTime,
                             QTimer, QUrl, Qt, QtMsgType, Signal, qInstallMessageHandler)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter,  # noqa: E402
-                           QPen, QPixmap)
+                           QPalette, QPen, QPixmap)
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGraphicsDropShadowEffect,
+    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGraphicsDropShadowEffect, QLayout,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QListWidget, QListWidgetItem, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
@@ -55,23 +56,43 @@ from PySide6.QtWidgets import (  # noqa: E402
 
 import baobab_core as core  # noqa: E402
 
-APP_TITLE = "Baobab HPC"
+APP_TITLE = "HPC Forest"
 APP_DIR_CODE = Path(__file__).resolve().parent
-ICON_FILE = APP_DIR_CODE / "baobab.ico"
+ICON_FILE = APP_DIR_CODE / "forest.ico"
 POLL_MS = 60_000
 STATUS_MS = 120_000
 log = logging.getLogger("baobab")
 
 # ── Look ──────────────────────────────────────────────────────────────────────
-C = {"bg": "#f4f6fb", "card": "#ffffff", "line": "#e3e8f0", "field": "#d6dce6",
-     "text": "#1f2937", "muted": "#6b7280", "accent": "#3b6fe0", "accent_soft": "#e8efff",
-     "ok": "#15803d", "ok_soft": "#e6f6ec", "warn": "#b45309", "warn_soft": "#fff4e0",
-     "err": "#c62828", "err_soft": "#fdecec", "grey_soft": "#eef1f6"}
+PALETTES = {
+    "light": {"bg": "#f6f4f7", "card": "#ffffff", "input": "#ffffff", "line": "#ece4ea",
+              "field": "#dccfd7", "text": "#1f2430", "muted": "#6e6a75",
+              "accent": "#d63b7a", "accent_hover": "#bd2e68", "accent_off": "#efb6cd",
+              "accent_soft": "#fde7f0", "on_accent": "#ffffff",
+              "tile_hover": "#e8b3c9", "tile_sel": "#fff6fa", "disabled": "#a7a1ab",
+              "ok": "#15803d", "ok_soft": "#e6f6ec", "warn": "#b45309", "warn_soft": "#fff4e0",
+              "err": "#c62828", "err_soft": "#fdecec", "grey_soft": "#f1ecf0",
+              "violet_soft": "#f3e8fb", "star": "#e0a100", "shadow": (40, 10, 30, 22)},
+    "dark": {"bg": "#131217", "card": "#1d1b22", "input": "#16151a", "line": "#2e2b35",
+             "field": "#433e4b", "text": "#ebe8ef", "muted": "#a29cab",
+             "accent": "#f0649f", "accent_hover": "#ff80b4", "accent_off": "#6e3a52",
+             "accent_soft": "#3b2130", "on_accent": "#1a0e14",
+             "tile_hover": "#8a4867", "tile_sel": "#2a1c25", "disabled": "#6b6672",
+             "ok": "#4ade80", "ok_soft": "#14301f", "warn": "#fbbf24", "warn_soft": "#3a2d10",
+             "err": "#f87171", "err_soft": "#3d1b1e", "grey_soft": "#27242d",
+             "violet_soft": "#33243f", "star": "#ffc83d", "shadow": (0, 0, 0, 90)},
+}
+C = dict(PALETTES["light"])          # the active palette (updated in place on theme change)
+THEME = {"name": "light"}
 
-STYLE = f"""
+
+def style_sheet() -> str:
+    return f"""
 QMainWindow, QWidget#page, QScrollArea, QScrollArea > QWidget > QWidget#pagebody {{
     background: {C['bg']}; }}
 QWidget {{ color: {C['text']}; font-size: 10pt; }}
+QDialog, QMessageBox, QInputDialog {{ background: {C['card']}; }}
+QToolTip {{ background: {C['card']}; color: {C['text']}; border: 1px solid {C['line']}; }}
 QFrame#sidebar {{ background: {C['card']}; border-right: 1px solid {C['line']}; }}
 QLabel#brand {{ font-size: 13pt; font-weight: 700; }}
 QLabel#brandsub {{ color: {C['muted']}; font-size: 8.5pt; }}
@@ -82,7 +103,11 @@ QPushButton#nav:checked {{ background: {C['accent_soft']}; color: {C['accent']};
 QLabel#pill {{ border-radius: 12px; padding: 5px 10px; font-size: 9pt; }}
 QLabel#h1 {{ font-size: 17pt; font-weight: 700; }}
 QLabel#sub {{ color: {C['muted']}; font-size: 10pt; }}
+QLabel#body {{ color: {C['text']}; }}
+QLabel#sectionhead {{ padding: 8px 2px 2px 2px; color: {C['text']}; }}
 QFrame#card {{ background: {C['card']}; border: 1px solid {C['line']}; border-radius: 12px; }}
+QFrame#suggest {{ background: {C['accent_soft']}; border-radius: 8px; }}
+QFrame#suggest QLabel {{ background: transparent; }}
 QLabel#cardtitle {{ font-size: 11.5pt; font-weight: 600; }}
 QLabel#cardnum {{ background: {C['accent_soft']}; color: {C['accent']}; border-radius: 11px;
                   font-weight: 700; min-width: 22px; max-width: 22px; min-height: 22px;
@@ -90,37 +115,88 @@ QLabel#cardnum {{ background: {C['accent_soft']}; color: {C['accent']}; border-r
 QLabel#hint {{ color: {C['muted']}; }}
 QLabel#warn {{ color: {C['err']}; }}
 QLabel#ok {{ color: {C['ok']}; }}
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{
-    background: white; border: 1px solid {C['field']}; border-radius: 8px; padding: 5px 9px;
-    selection-background-color: {C['accent']}; }}
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QListWidget {{
+    background: {C['input']}; border: 1px solid {C['field']}; border-radius: 8px; padding: 5px 9px;
+    selection-background-color: {C['accent']}; selection-color: {C['on_accent']}; }}
+QComboBox QAbstractItemView {{ background: {C['input']}; color: {C['text']};
+    selection-background-color: {C['accent_soft']}; selection-color: {C['text']}; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {C['accent']}; }}
 QLineEdit:read-only {{ background: {C['bg']}; }}
-QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: #a0a7b4; background: {C['bg']}; }}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: {C['disabled']};
+    background: {C['bg']}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
-QPushButton {{ background: white; border: 1px solid {C['field']}; border-radius: 8px;
+QPushButton {{ background: {C['input']}; border: 1px solid {C['field']}; border-radius: 8px;
                padding: 6px 14px; }}
 QPushButton:hover {{ background: {C['grey_soft']}; }}
-QPushButton:disabled {{ color: #a0a7b4; }}
-QPushButton#primary {{ background: {C['accent']}; color: white; border: none; font-weight: 600;
-                       padding: 8px 22px; }}
-QPushButton#primary:hover {{ background: #3160cc; }}
-QPushButton#primary:disabled {{ background: #a9bde9; }}
+QPushButton:disabled {{ color: {C['disabled']}; }}
+QPushButton#primary {{ background: {C['accent']}; color: {C['on_accent']}; border: none;
+                       font-weight: 600; padding: 8px 22px; }}
+QPushButton#primary:hover {{ background: {C['accent_hover']}; }}
+QPushButton#primary:disabled {{ background: {C['accent_off']}; }}
 QPushButton#link {{ border: none; background: transparent; color: {C['accent']}; padding: 2px 4px; }}
 QPushButton#link:hover {{ text-decoration: underline; }}
+QCheckBox::indicator:checked {{ background: {C['accent']}; border: 1px solid {C['accent']};
+                                border-radius: 3px; }}
 QProgressBar {{ background: {C['grey_soft']}; border: none; border-radius: 5px; height: 10px;
                 text-align: center; font-size: 8pt; }}
 QProgressBar::chunk {{ background: {C['accent']}; border-radius: 5px; }}
-QTableWidget {{ background: white; border: none; gridline-color: {C['line']};
+QTableWidget {{ background: {C['card']}; border: none; gridline-color: {C['line']};
                 selection-background-color: {C['accent_soft']}; selection-color: {C['text']}; }}
-QHeaderView::section {{ background: white; border: none; border-bottom: 1px solid {C['line']};
+QHeaderView::section {{ background: {C['card']}; border: none; border-bottom: 1px solid {C['line']};
                         padding: 6px; color: {C['muted']}; font-weight: 600; }}
-QFrame#tile {{ background: white; border: 1px solid {C['line']}; border-radius: 10px; }}
-QFrame#tile:hover {{ border: 1px solid #b9c6de; }}
-QFrame#tile[selected="true"] {{ border: 2px solid {C['accent']}; background: #f7f9ff; }}
+QTableCornerButton::section {{ background: {C['card']}; border: none; }}
+QFrame#tile {{ background: {C['card']}; border: 1px solid {C['line']}; border-radius: 10px; }}
+QFrame#tile:hover {{ border: 1px solid {C['tile_hover']}; }}
+QFrame#tile[selected="true"] {{ border: 2px solid {C['accent']}; background: {C['tile_sel']}; }}
 QLabel#tilename {{ font-weight: 700; font-size: 10.5pt; }}
+QLabel#tiletag {{ color: {C['muted']}; font-size: 9pt; }}
 QLabel#badge {{ border-radius: 9px; padding: 2px 8px; font-size: 8.5pt; font-weight: 600; }}
 QCheckBox {{ spacing: 8px; }}
+QScrollBar:vertical {{ background: transparent; width: 11px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {C['field']}; border-radius: 4px; min-height: 30px; }}
+QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {C['field']}; border-radius: 4px; min-width: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 """
+
+
+def qt_palette() -> QPalette:
+    """Native parts (message boxes, menus, file dialogs drawn by Qt) follow the theme."""
+    pal = QPalette()
+    for role, key in ((QPalette.Window, "card"), (QPalette.WindowText, "text"),
+                      (QPalette.Base, "input"), (QPalette.AlternateBase, "grey_soft"),
+                      (QPalette.Text, "text"), (QPalette.Button, "card"),
+                      (QPalette.ButtonText, "text"), (QPalette.ToolTipBase, "card"),
+                      (QPalette.ToolTipText, "text"), (QPalette.Highlight, "accent"),
+                      (QPalette.HighlightedText, "on_accent"), (QPalette.PlaceholderText, "muted"),
+                      (QPalette.Link, "accent")):
+        pal.setColor(role, QColor(C[key]))
+    for role in (QPalette.Text, QPalette.WindowText, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor(C["disabled"]))
+    return pal
+
+
+def system_is_dark() -> bool:
+    try:
+        return QApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    except AttributeError:                      # Qt older than 6.5
+        return False
+
+
+def set_theme(choice: str) -> str:
+    """choice: 'light', 'dark' or 'system'. Updates the palette, the style sheet and the
+    native palette; returns the theme actually used."""
+    name = "dark" if choice == "dark" or (choice == "system" and system_is_dark()) else "light"
+    C.clear()
+    C.update(PALETTES[name])
+    THEME["name"] = name
+    app = QApplication.instance()
+    if app is not None:
+        app.setPalette(qt_palette())
+        app.setStyleSheet(build_style())
+    return name
+
 
 def _arrow_png(path: Path, up: bool, color: str):
     pm = QPixmap(20, 12)
@@ -144,13 +220,13 @@ def build_style() -> str:
     d = core.APP_DIR / "ui"
     d.mkdir(parents=True, exist_ok=True)
     files = {"down": (False, C["muted"]), "up": (True, C["muted"]),
-             "down_off": (False, "#c3c9d4"), "up_off": (True, "#c3c9d4")}
+             "down_off": (False, C["disabled"]), "up_off": (True, C["disabled"])}
     url = {}
     for name, (up, col) in files.items():
-        f = d / f"{name}.png"
+        f = d / f"{name}_{THEME['name']}.png"
         _arrow_png(f, up, col)
         url[name] = f.as_posix()
-    return STYLE + f"""
+    return style_sheet() + f"""
 QComboBox {{ padding-right: 26px; }}
 QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right;
                         width: 26px; border: none; }}
@@ -169,13 +245,18 @@ QSpinBox::down-arrow:disabled {{ image: url("{url['down_off']}"); }}
 """
 
 
-BADGES = {"now": ("Can start now", C["ok"], C["ok_soft"]),
-          "wait": ("Will queue", C["warn"], C["warn_soft"]),
-          "never": ("Not possible", C["err"], C["err_soft"]),
-          "unknown": ("", C["muted"], C["grey_soft"])}
-STATE_COLORS = {"STAGING": C["accent_soft"], "UPLOADING": C["accent_soft"], "RUNNING": C["ok_soft"], "PENDING": C["warn_soft"], "COMPLETED": C["grey_soft"],
-                "FAILED": C["err_soft"], "TIMEOUT": C["err_soft"], "OUT_OF_MEMORY": C["err_soft"],
-                "CANCELLED": "#f3e8fb", "NODE_FAIL": C["err_soft"], "UNKNOWN": C["grey_soft"]}
+BADGES = {"now": ("Can start now", "ok", "ok_soft"),
+          "wait": ("Will queue", "warn", "warn_soft"),
+          "never": ("Not possible", "err", "err_soft"),
+          "unknown": ("", "muted", "grey_soft")}
+def state_color(state: str) -> str:
+    return C[_STATE_KEYS.get(state, "card")]
+
+
+_STATE_KEYS = {"STAGING": "accent_soft", "UPLOADING": "accent_soft", "RUNNING": "ok_soft",
+               "PENDING": "warn_soft", "COMPLETED": "grey_soft", "FAILED": "err_soft",
+               "TIMEOUT": "err_soft", "OUT_OF_MEMORY": "err_soft", "CANCELLED": "violet_soft",
+               "NODE_FAIL": "err_soft", "UNKNOWN": "grey_soft"}
 GPU_LABELS = {"ampere": "Ampere - multipurpose", "titan": "Titan - single precision / ML",
               "pascal": "Pascal - double precision", "rtx": "RTX - ML"}
 
@@ -221,7 +302,8 @@ def set_kind(w: QWidget, kind: str):
 def set_badge(lab: QLabel, kind: str, text: str | None = None):
     t, fg, bg = BADGES[kind]
     lab.setText(text if text is not None else t)
-    lab.setStyleSheet(f"color:{fg}; background:{bg}; border-radius: 8px; padding: 0px 9px;"
+    lab.setProperty("fit", kind)
+    lab.setStyleSheet(f"color:{C[fg]}; background:{C[bg]}; border-radius: 8px; padding: 0px 9px;"
                       " font-size: 8.5pt; font-weight: 600;")
     lab.setVisible(bool(lab.text()))
 
@@ -255,6 +337,64 @@ def fmt_int(n: int) -> str:
     return f"{n:,}".replace(",", "\u2009")
 
 
+class FlowLayout(QLayout):
+    """Lays widgets out left to right and wraps them like words in a paragraph."""
+
+    def __init__(self, parent=None, spacing=8):
+        super().__init__(parent)
+        self._items = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        x, y, line_h, sp = rect.x(), rect.y(), 0, self.spacing()
+        for it in self._items:
+            if it.widget() is not None and not it.widget().isVisible() and not test_only:
+                continue
+            w = it.sizeHint()
+            if x + w.width() > rect.right() + 1 and line_h > 0:
+                x, y, line_h = rect.x(), y + line_h + sp, 0
+            if not test_only:
+                it.setGeometry(QRect(QPoint(x, y), w))
+            x += w.width() + sp
+            line_h = max(line_h, w.height())
+        return y + line_h - rect.y()
+
+
 class Card(QFrame):
     """White rounded card with an optional step number, title and subtitle."""
 
@@ -264,7 +404,7 @@ class Card(QFrame):
         sh = QGraphicsDropShadowEffect(self)
         sh.setBlurRadius(18)
         sh.setOffset(0, 2)
-        sh.setColor(QColor(15, 23, 42, 18))
+        sh.setColor(QColor(*C["shadow"]))
         self.setGraphicsEffect(sh)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 16, 20, 18)
@@ -345,22 +485,39 @@ class Worker(QRunnable):
             self.signals.done.emit(result)
 
 
+def pkey(part: dict) -> str:
+    """Partitions are identified by cluster and name: 'yggdrasil:shared-gpu'."""
+    return f"{part.get('cluster', 'baobab')}:{part['name']}"
+
+
 # ── Partition tile ────────────────────────────────────────────────────────────
 class PartitionTile(QFrame):
+    """One partition. Built once, then updated in place at each refresh."""
     clicked = Signal(str)
+    star_clicked = Signal(str)
 
-    def __init__(self, part: dict):
-        super().__init__()
+    def __init__(self, part: dict, parent: QWidget):
+        super().__init__(parent)            # never a top-level window, even for a moment
         self.setObjectName("tile")
         self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumWidth(300)
         self.name = part["name"]
+        self.key = pkey(part)
         v = QVBoxLayout(self)
         v.setContentsMargins(12, 10, 12, 10)
         v.setSpacing(5)
         top = QHBoxLayout()
+        top.setSpacing(6)
+        self.star = QLabel("☆")
+        self.star.setToolTip("Mark as favorite")
+        top.addWidget(self.star, 0, Qt.AlignVCenter)
         n = QLabel(part["name"])
         n.setObjectName("tilename")
         top.addWidget(n)
+        self.tag = QLabel(core.cluster_name(part.get("cluster", "baobab")))
+        self.tag.setObjectName("tiletag")
+        self.tag.hide()
+        top.addWidget(self.tag, 0, Qt.AlignVCenter)
         top.addStretch(1)
         self.badge = QLabel()
         self.badge.setObjectName("badge")
@@ -368,36 +525,51 @@ class PartitionTile(QFrame):
         self.badge.setAlignment(Qt.AlignCenter)
         top.addWidget(self.badge, 0, Qt.AlignVCenter)
         v.addLayout(top)
-        meta = [f"max {core.human_duration(part['limit_s'])}"]
-        if part["kind"] == "private":
-            meta.append("your group's nodes, higher priority")
-        if part["waiting"]:
-            meta.append(f"{part['waiting']} job(s) waiting")
-        v.addWidget(label("  ·  ".join(meta)))
-        bar = QProgressBar()
-        bar.setTextVisible(False)
-        bar.setFixedHeight(6)
-        total = max(part["cpus_total"], 1)
-        bar.setRange(0, total)
-        bar.setValue(part["cpus_free"])
-        v.addWidget(bar)
-        cores = (f"{fmt_int(part['cpus_free'])} of {fmt_int(part['cpus_total'])} cores free  ·  "
-                 f"{part['nodes_idle']} idle node(s)")
-        if part["nodes_usable"] < part["nodes_total"]:
-            cores += f"  ·  {part['nodes_total'] - part['nodes_usable']} unavailable"
-        v.addWidget(label(cores))
-        if part["gpu_total"]:
-            g = "  ·  ".join(f"{t} {part['gpu_free'].get(t, 0)}/{n}"
-                             for t, n in sorted(part["gpu_total"].items()))
-            v.addWidget(label("GPUs free: " + g))
+        self.meta = label("")
+        v.addWidget(self.meta)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
+        v.addWidget(self.bar)
+        self.cores = label("")
+        v.addWidget(self.cores)
+        self.gpus = label("")
+        v.addWidget(self.gpus)
         self.reason = label("")
         v.addWidget(self.reason)
         v.addStretch(1)
         # selectable labels would swallow clicks on their text: let the tile get them all
         for w in self.findChildren(QWidget):
             w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.update_part(part)
+        self.set_favorite(False, False)
         self.set_selected(False)
         self.set_fit("unknown", "")
+
+    def update_part(self, part: dict):
+        meta = [f"max {core.human_duration(part['limit_s'])}"]
+        if part["kind"] == "private":
+            meta.append("your group's nodes, higher priority")
+        if part["waiting"]:
+            meta.append(f"{part['waiting']} job(s) waiting")
+        self.meta.setText("  ·  ".join(meta))
+        self.bar.setRange(0, max(part["cpus_total"], 1))
+        self.bar.setValue(part["cpus_free"])
+        cores = (f"{fmt_int(part['cpus_free'])} of {fmt_int(part['cpus_total'])} cores free  ·  "
+                 f"{part['nodes_idle']} idle node(s)")
+        if part["nodes_usable"] < part["nodes_total"]:
+            cores += f"  ·  {part['nodes_total'] - part['nodes_usable']} unavailable"
+        self.cores.setText(cores)
+        g = "  ·  ".join(f"{t} {part['gpu_free'].get(t, 0)}/{n}"
+                         for t, n in sorted(part["gpu_total"].items()))
+        self.gpus.setText("GPUs free: " + g if g else "")
+        self.gpus.setVisible(bool(g))
+
+    def set_favorite(self, on: bool, show_cluster: bool):
+        self.star.setText("★" if on else "☆")
+        self.star.setStyleSheet(f"font-size: 15pt; color: {C['star'] if on else C['muted']};")
+        self.star.setToolTip("Remove from favorites" if on else "Mark as favorite")
+        self.tag.setVisible(show_cluster)
 
     def set_selected(self, on: bool):
         self.setProperty("selected", "true" if on else "false")
@@ -412,14 +584,28 @@ class PartitionTile(QFrame):
         self.reason.setVisible(bool(text))
 
     def mouseReleaseEvent(self, ev):
-        if ev.button() == Qt.LeftButton and self.rect().contains(ev.position().toPoint()):
-            self.clicked.emit(self.name)
+        pos = ev.position().toPoint()
+        if ev.button() == Qt.LeftButton and self.rect().contains(pos):
+            if self.star.geometry().adjusted(-6, -6, 6, 6).contains(pos):
+                self.star_clicked.emit(self.key)
+            else:
+                self.clicked.emit(self.key)
         super().mouseReleaseEvent(ev)
+
+
+class TileBox(QWidget):
+    """Holds the partition tiles; tells the page when its width changes."""
+    resized = Signal()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if ev.size().width() != ev.oldSize().width():
+            self.resized.emit()
 
 
 # ── NAS folder browser ────────────────────────────────────────────────────────
 class NasBrowser(QDialog):
-    """Browse the lab NAS through Baobab and pick a folder."""
+    """Browse the lab NAS through the cluster and pick a folder."""
 
     def __init__(self, win: "MainWindow", start: str, title: str):
         super().__init__(win)
@@ -452,7 +638,7 @@ class NasBrowser(QDialog):
     def load(self):
         self.where.setText(f"<b>{self.win.profile['nas_share']}</b> / {self.path or '(top)'}")
         self.list.clear()
-        self.status.setText("Reading the NAS through Baobab...")
+        self.status.setText("Reading the NAS through the cluster...")
         self.ok_btn.setEnabled(False)
         conn, prof, path = self.win.conn, self.win.profile, self.path
 
@@ -512,17 +698,29 @@ class SettingsPage(Page):
         f.addRow("Email", stack(self.email, hint("Receives a message when a job ends or fails.")))
         acc.add(f)
 
-        con = self.add(Card("SSH connection",
-                            "From home or abroad, connect to the UNIGE VPN first."))
+        con = self.add(Card("Clusters and SSH connection",
+                            "Your account and SSH key work on every UNIGE cluster. Each has its "
+                            "own home and scratch. From home or abroad, connect to the UNIGE VPN "
+                            "first."))
         f = QFormLayout()
         f.setVerticalSpacing(10)
         f.setHorizontalSpacing(16)
-        self.host = QLineEdit(p["host"])
+        self.cluster_checks: dict[str, QCheckBox] = {}
+        cl = QHBoxLayout()
+        cl.setSpacing(18)
+        for k, c in core.CLUSTERS.items():
+            cb = QCheckBox(c["name"])
+            cb.setChecked(k in p.get("clusters", ["baobab"]))
+            cb.setToolTip(c["host"])
+            self.cluster_checks[k] = cb
+            cl.addWidget(cb)
+        cl.addStretch(1)
+        f.addRow("Use", stack(cl, hint("The app connects to all of them and compares what is "
+                                       "free; New job lets you pick where to run.")))
         self.key = QLineEdit(p["key_path"])
         b = QPushButton("Browse...")
         b.clicked.connect(self.pick_key)
         self.key_hint = hint()
-        f.addRow("Cluster", self.host)
         f.addRow("SSH key", stack(row(self.key, b), self.key_hint))
         con.add(f)
         self.connect_btn = QPushButton("Connect")
@@ -531,8 +729,8 @@ class SettingsPage(Page):
         self.status = hint("Not connected.")
         con.add(row(self.status, self.connect_btn))
 
-        sw = self.add(Card("Software on Baobab",
-                           "Version lists are read from Baobab when you connect."))
+        sw = self.add(Card("Preferred software versions",
+                           "Version lists are read from the clusters when you connect."))
         f = QFormLayout()
         f.setVerticalSpacing(10)
         f.setHorizontalSpacing(16)
@@ -550,7 +748,7 @@ class SettingsPage(Page):
         sw.add(f)
 
         nas = self.add(Card("Lab NAS",
-                            "Data and results can live on the lab NAS: Baobab copies them "
+                            "Data and results can live on the lab NAS: the cluster copies them "
                             "directly, without going through this PC."))
         f = QFormLayout()
         f.setVerticalSpacing(10)
@@ -559,14 +757,23 @@ class SettingsPage(Page):
         self.realm = QLineEdit(p["kerberos_realm"])
         f.addRow("NAS share", self.nas_share)
         f.addRow("Kerberos realm", stack(self.realm, hint(
-            "Baobab logs in to the NAS with a Kerberos ticket: you give your ISIS password "
+            "Each cluster logs in to the NAS with a Kerberos ticket: you give your ISIS password "
             "once, the ticket lasts 10 hours and the app renews it for up to a week. The "
             "password is never stored.")))
         nas.add(f)
         self.nas_btn = QPushButton("Log in to the NAS")
         self.nas_btn.clicked.connect(lambda: win.nas_login())
-        self.nas_status = hint("Connect to Baobab first.")
+        self.nas_status = hint("Connect to a cluster first.")
         nas.add(row(self.nas_status, self.nas_btn))
+
+        look = self.add(Card("Appearance"))
+        self.theme = QComboBox()
+        for label_, val in (("Same as Windows", "system"), ("Light", "light"), ("Dark", "dark")):
+            self.theme.addItem(label_, val)
+        self.theme.setCurrentIndex(max(0, self.theme.findData(p.get("theme", "system"))))
+        self.theme.setMaximumWidth(220)
+        self.theme.currentIndexChanged.connect(lambda _: win.apply_theme(self.theme.currentData()))
+        look.add(row(QLabel("Theme"), self.theme, QWidget(), stretch_first=False))
 
         files = self.add(Card("Files and logs"))
         b = QPushButton("Open the app's data folder")
@@ -607,7 +814,7 @@ class SettingsPage(Page):
         if line and line.endswith(ver):
             self.python_line.setText(f"Loads: module load {line}")
         else:
-            self.python_line.setText("Requirements are checked on Baobab when connected.")
+            self.python_line.setText("Requirements are checked on the cluster when connected.")
 
     def python_changed(self, ver):
         ver = ver.strip()
@@ -623,7 +830,8 @@ class SettingsPage(Page):
         p = self.win.profile
         p["username"] = self.user.text().strip()
         p["email"] = self.email.text().strip()
-        p["host"] = self.host.text().strip() or core.DEFAULT_HOST
+        p["clusters"] = [k for k, cb in self.cluster_checks.items() if cb.isChecked()] \
+            or ["baobab"]
         p["key_path"] = self.key.text().strip()
         p["matlab_module"] = self.matlab.currentText().strip() or "MATLAB/2022a"
         p["python_version"] = self.python.currentText().strip() or "Python/3.12.3"
@@ -649,7 +857,7 @@ class SettingsPage(Page):
 class NewJobPage(Page):
     def __init__(self, win: "MainWindow"):
         super().__init__("New job", "Choose your code, your data and the resources. Everything "
-                                    "is copied to Baobab with checksum verification, and the "
+                                    "is copied to the cluster with checksum verification, and the "
                                     "results come back by themselves.")
         self.win = win
         self.name_edited = False
@@ -739,11 +947,15 @@ class NewJobPage(Page):
         self.status_time = hint("")
         card.head.addWidget(self.status_time)
         card.head.addWidget(rb)
-        self.parts_note = hint("Connect to Baobab to see the partitions and what is free right now.")
+        self.parts_note = hint("Connect to the clusters to see the partitions and what is free right now.")
         card.add(self.parts_note)
-        self.tile_grid = QGridLayout()
+        self.tiles_box = TileBox()
+        self.tiles_box.resized.connect(self.relayout_if_columns_changed)
+        self.tile_grid = QGridLayout(self.tiles_box)
+        self.tile_grid.setContentsMargins(0, 0, 0, 0)
+        self.n_cols = 0
         self.tile_grid.setSpacing(10)
-        card.add(self.tile_grid)
+        card.add(self.tiles_box)
         self.private_btn = QPushButton("Show private partitions")
         self.private_btn.setObjectName("link")
         self.private_btn.setCheckable(True)
@@ -784,36 +996,37 @@ class NewJobPage(Page):
         self.array_max.setPrefix("at most ")
         self.array_max.setSuffix(" at once")
         self.array_info = hint()
-        arr = QHBoxLayout()
-        arr.setSpacing(8)
-        arr.addWidget(self.array)
-        arr.addWidget(self.array_range)
-        arr.addWidget(self.array_max)
-        arr.addStretch(1)
+        arr = QGridLayout()                      # checkbox above its fields: narrows well
+        arr.setHorizontalSpacing(8)
+        arr.setVerticalSpacing(4)
+        arr.addWidget(self.array, 0, 0, 1, 3)
+        arr.addWidget(self.array_range, 1, 0)
+        arr.addWidget(self.array_max, 1, 1)
+        arr.setColumnStretch(2, 1)
         f.addRow("Repeat", stack(arr, self.array_info))
-        self.cont = QCheckBox("Continue automatically in a new run, from the last checkpoint")
+        self.cont = QCheckBox("Continue automatically from the last checkpoint")
         self.cont_runs = QSpinBox()
         self.cont_runs.setRange(2, 50)
         self.cont_runs.setValue(10)
         self.cont_runs.setPrefix("up to ")
         self.cont_runs.setSuffix(" runs")
         self.cont_info = hint()
-        cr = QHBoxLayout()
-        cr.setSpacing(8)
-        cr.addWidget(self.cont)
-        cr.addWidget(self.cont_runs)
-        cr.addStretch(1)
+        cr = QGridLayout()
+        cr.setHorizontalSpacing(8)
+        cr.setVerticalSpacing(4)
+        cr.addWidget(self.cont, 0, 0, 1, 2)
+        cr.addWidget(self.cont_runs, 1, 0)
+        cr.setColumnStretch(1, 1)
         f.addRow("Time limit", stack(cr, self.cont_info))
         card.add(f)
 
         # measured usage of an earlier run of the same script
         self.suggest_box = QFrame()
-        self.suggest_box.setStyleSheet(f"QFrame {{ background: {C['accent_soft']}; border-radius: 8px; }}")
+        self.suggest_box.setObjectName("suggest")
         sb = QHBoxLayout(self.suggest_box)
         sb.setContentsMargins(12, 8, 12, 8)
         self.suggest_label = QLabel()
         self.suggest_label.setWordWrap(True)
-        self.suggest_label.setStyleSheet("background: transparent;")
         self.suggest_apply = QPushButton("Use these settings")
         self.suggest_apply.clicked.connect(self.apply_suggestion)
         sb.addWidget(self.suggest_label, 1)
@@ -941,10 +1154,10 @@ class NewJobPage(Page):
             self.nas_info.setText(
                 f"{len(files)} file(s), {core.human_size(total)}"
                 + (" (its 'results' folder is not copied)" if skipped else "")
-                + f". Copied to Baobab before your job: about "
+                + f". Copied to the cluster before your job: about "
                 f"{core.human_duration(max(60, int(first)))} the first time, then only changes.")
             self.nas_info.setToolTip(
-                "A staging job copies the folder to your scratch space on Baobab, directly from "
+                "A staging job copies the folder to your scratch space on the cluster, directly from "
                 "the NAS, then your job starts. Later jobs on the same folder only copy new or "
                 "changed files. Your script finds the data in ./data/."
                 + (f" The folder's 'results' subfolder ({skipped} file(s)) holds results of "
@@ -1142,7 +1355,7 @@ class NewJobPage(Page):
                 "Your script finds it in ./data/.")
         else:
             self.largest_data_file = 0
-            self.data_info.setText("No data folder: ./data/ will be empty on Baobab.")
+            self.data_info.setText("No data folder: ./data/ will be empty on the cluster.")
         self.update_results_info()
         if hasattr(self, "mem_info"):
             self.update_resource_hints()
@@ -1168,7 +1381,7 @@ class NewJobPage(Page):
         if hasattr(self, "nas_res_info"):
             nb = self.nas_results.text().strip().rstrip("/")
             self.nas_res_info.setText(
-                f"After the job, Baobab copies the results and logs into a new folder there: "
+                f"After the job, the cluster copies the results and logs into a new folder there: "
                 f"{name}_<job id>" if nb else "Choose a folder on the NAS.")
 
     def entry_changed(self, rel: str):
@@ -1191,7 +1404,7 @@ class NewJobPage(Page):
             missing = [] if req else core.third_party_imports(proj, rel)
             if req:
                 where = req.relative_to(proj.resolve()).as_posix()
-                txt += (f" Packages from {where} are installed on Baobab the first time, "
+                txt += (f" Packages from {where} are installed on the cluster the first time, "
                         "then reused.")
             elif missing:
                 txt = (f"This script imports {', '.join(missing)}, but no requirements.txt was "
@@ -1210,58 +1423,154 @@ class NewJobPage(Page):
 
     # partitions
     def fill_partitions(self, parts: list[dict]):
-        for t in self.tiles.values():
-            t.setParent(None)
-            t.deleteLater()
-        self.tiles = {}
+        """Refresh the tiles in place: existing ones are updated, not rebuilt."""
+        keys = []
         for p in parts:
-            t = PartitionTile(p)
-            t.clicked.connect(self.select_partition)
-            self.tiles[p["name"]] = t
-        names = [p["name"] for p in parts]
-        has_private = any(p["kind"] == "private" for p in parts)
-        self.private_btn.setVisible(has_private)
-        self.parts_note.setText("Click a partition. The badge tells whether your request, with "
-                                "the resources below, could start right now." if parts else
+            k = pkey(p)
+            keys.append(k)
+            if k in self.tiles:
+                self.tiles[k].update_part(p)
+            else:
+                t = PartitionTile(p, self.tiles_box)
+                t.hide()
+                t.clicked.connect(self.select_partition)
+                t.star_clicked.connect(self.toggle_favorite)
+                self.tiles[k] = t
+        for k in [k for k in self.tiles if k not in keys]:
+            t = self.tiles.pop(k)
+            t.hide()
+            t.deleteLater()
+        self.private_btn.setVisible(any(p["kind"] == "private" for p in parts))
+        self.parts_note.setText("Click a partition to choose where to run; ☆ marks a favorite. "
+                                "The badge tells whether your request, with the resources below, "
+                                "could start right now." if parts else
                                 "No partition available to your account.")
-        if self.selected_partition not in names:
-            pick = "shared-cpu" if "shared-cpu" in names else \
-                next((p["name"] for p in parts if p["default"]), names[0] if names else None)
+        if self.selected_partition not in keys:
+            favs = [k for k in self.favorites() if k in keys]
+            first = f"{self.win.active}:shared-cpu"
+            pick = favs[0] if favs else first if first in keys else next(
+                (k for k in keys if k.endswith(":shared-cpu")),
+                next((pkey(p) for p in parts if p["default"]), keys[0] if keys else None))
             self.selected_partition = pick
         self.fill_gpu_choices(self.current_partition())
         self.layout_tiles()
         self.select_partition(self.selected_partition)
         self.status_time.setText("updated " + QTime.currentTime().toString("HH:mm"))
 
+    # favorites
+    def favorites(self) -> list[str]:
+        return list(self.win.profile.get("favorites") or [])
+
+    def toggle_favorite(self, key: str):
+        favs = self.favorites()
+        if key in favs:
+            favs.remove(key)
+        else:
+            favs.append(key)
+        self.win.profile["favorites"] = favs
+        self.win.save_profile()
+        self.layout_tiles()
+
+    def tile(self, name: str) -> "PartitionTile":
+        """Tile by 'cluster:name', or by name on the active cluster."""
+        return self.tiles.get(name) or self.tiles.get(f"{self.win.active}:{name}") or \
+            next(t for k, t in self.tiles.items() if k.split(":", 1)[1] == name)
+
+    def cluster_summary(self, key: str) -> str:
+        """Whole-cluster availability: every node counted once (partitions overlap)."""
+        nodes = {}
+        for p in self.win.partitions:
+            if p.get("cluster") == key and p["kind"] != "private":
+                for n in p["nodes"]:
+                    nodes[n["name"]] = n
+        free = sum(n["free_cpus"] for n in nodes.values())
+        total = sum(n["cpus"] for n in nodes.values())
+        gpus: dict[str, list] = {}
+        for n in nodes.values():
+            for t_, cnt in n["gpus_total"].items():
+                e = gpus.setdefault(t_, [0, 0])
+                e[0] += n["gpus_free"].get(t_, 0)
+                e[1] += cnt
+        g = ", ".join(f"{t_} {f}/{c}" for t_, (f, c) in sorted(gpus.items()))
+        return (f"<b>{core.cluster_name(key)}</b> &nbsp;·&nbsp; {fmt_int(free)} of "
+                f"{fmt_int(total)} cores free" + (f" &nbsp;·&nbsp; GPUs free: {g}" if g else ""))
+
+    def columns(self) -> int:
+        # from the page's visible width (the tiles' own width would hold itself up)
+        w = self.viewport().width() - 100          # page and card margins
+        return 2 if w < 150 else max(1, min(6, w // 340))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.relayout_if_columns_changed()
+
+    def relayout_if_columns_changed(self):
+        if self.tiles and self.columns() != self.n_cols:
+            self.layout_tiles()
+
     def layout_tiles(self):
         while self.tile_grid.count():
             self.tile_grid.takeAt(0)
+        for h in getattr(self, "headers", []):
+            h.hide()
+            h.deleteLater()
+        self.headers = []
+        cols = self.columns()
         show_private = self.private_btn.isChecked()
         self.private_btn.setText("Hide private partitions" if show_private
                                  else "Show private partitions")
-        i = 0
-        for p in self.win.partitions:
-            t = self.tiles.get(p["name"])
-            if not t:
-                continue
-            visible = p["kind"] != "private" or show_private or p["name"] == self.selected_partition
-            t.setVisible(visible)
-            if visible:
-                self.tile_grid.addWidget(t, i // 2, i % 2)
-                i += 1
+        parts = {pkey(p): p for p in self.win.partitions}
+        favs = [k for k in self.favorites() if k in self.tiles and k in parts]
+        clusters = [k for k in self.win.enabled_clusters()
+                    if any(p.get("cluster") == k for p in parts.values())]
+        multi = len(clusters) > 1
+        sections = []
+        if favs:
+            sections.append(("<b>★ Favorites</b>", favs))
+        for c in clusters:
+            members = [k for k, p in parts.items() if p.get("cluster") == c and k not in favs
+                       and (p["kind"] != "private" or show_private
+                            or k == self.selected_partition)]
+            sections.append((self.cluster_summary(c) if (multi or favs) else "", members))
+        placed, r = set(), 0
+        for title, members in sections:
+            if title:
+                h = QLabel(title, self.tiles_box)
+                h.setObjectName("sectionhead")
+                h.setWordWrap(True)                   # a long GPU list must not widen the page
+                self.headers.append(h)
+                self.tile_grid.addWidget(h, r, 0, 1, cols)
+                h.show()
+                r += 1
+            for i, k in enumerate(members):
+                t = self.tiles[k]
+                t.set_favorite(k in favs, show_cluster=(k in favs and multi))
+                self.tile_grid.addWidget(t, r + i // cols, i % cols)   # placed first...
+                t.show()                                               # ...then shown
+                placed.add(k)
+            r += (len(members) + cols - 1) // cols
+        for k, t in self.tiles.items():
+            if k not in placed:
+                t.hide()
+        for c in range(max(cols, self.n_cols, 2)):
+            self.tile_grid.setColumnStretch(c, 1 if c < cols else 0)
+        self.n_cols = cols
 
-    def select_partition(self, name: str | None):
-        if not name:
+    def select_partition(self, key: str | None):
+        if not key:
             return
-        self.selected_partition = name
-        for n, t in self.tiles.items():
-            t.set_selected(n == name)
+        if ":" not in key:                          # plain name: on the active cluster
+            key = self.tile(key).key
+        self.selected_partition = key
+        for k, t in self.tiles.items():
+            t.set_selected(k == key)
+        self.win.set_active(key.split(":", 1)[0])
         self.fill_gpu_choices(self.current_partition())
         self.apply_limits()
         self.update_fits()
 
     def current_partition(self) -> dict | None:
-        return next((p for p in self.win.partitions if p["name"] == self.selected_partition), None)
+        return next((p for p in self.win.partitions if pkey(p) == self.selected_partition), None)
 
     def fill_gpu_choices(self, part: dict | None):
         cur = self.gpu.currentData()
@@ -1299,13 +1608,13 @@ class NewJobPage(Page):
         except ValueError:
             want_s = sec
         for p in self.win.partitions:
-            t = self.tiles.get(p["name"])
+            t = self.tiles.get(pkey(p))
             if not t:
                 continue
             if sec is None:
                 t.set_fit("unknown", "")
                 continue
-            if p["name"] == self.selected_partition:     # fields already adapted to it
+            if pkey(p) == self.selected_partition:     # fields already adapted to it
                 w_s, cpus, mem = sec, self.cpus.value(), self.mem.value()
             else:
                 w_s = want_s or sec
@@ -1341,7 +1650,7 @@ class NewJobPage(Page):
                    "last run. Your script must be able to resume - see the demos.")
         else:
             txt = ("Every job is warned before its limit: " + warn[0].lower() + warn[1:] +
-                   " Tick this to have Baobab run it again from there, until it is done.")
+                   " Tick this to have the cluster run it again from there, until it is done.")
         self.cont_info.setText(txt)
         self.cont_runs.setEnabled(self.cont.isChecked() and not self.array.isChecked())
 
@@ -1369,7 +1678,7 @@ class NewJobPage(Page):
         p = self.win.profile
         part = self.current_partition()
         if not part:
-            raise core.BaobabError("Connect to Baobab first, then choose where to run.")
+            raise core.BaobabError("Connect to a cluster first, then choose where to run.")
         spec = core.JobSpec(
             name=core.safe_name(self.name.text(), "job"),
             project_dir=self.project.text(),
@@ -1392,6 +1701,7 @@ class NewJobPage(Page):
             nas_full_verify=self.full_verify.isChecked(),
             matlab_module=p["matlab_module"],
             python_modules=p.get("python_modules") or p["python_version"],
+            python_version=p["python_version"],
             cuda_module=p["cuda_module"],
             continue_runs=self.cont_runs.value() if self.cont.isChecked() else 0)
         if self.data_src.currentIndex() == 1 and not spec.nas_data:
@@ -1409,7 +1719,7 @@ class NewJobPage(Page):
 
     def estimate(self):
         if not self.win.conn.alive():
-            QMessageBox.warning(self, APP_TITLE, "Not connected to Baobab.")
+            QMessageBox.warning(self, APP_TITLE, f"Not connected to {core.cluster_name(self.win.active)}.")
             return
         part = self.current_partition()
         if not part:
@@ -1471,7 +1781,7 @@ class NewJobPage(Page):
 
     def submit(self):
         if not self.win.conn.alive():
-            QMessageBox.warning(self, APP_TITLE, "Not connected to Baobab. Connect in Settings.")
+            QMessageBox.warning(self, APP_TITLE, f"Not connected to {core.cluster_name(self.win.active)}. Connect in Settings.")
             return
         try:
             spec = self.collect_spec()
@@ -1483,7 +1793,7 @@ class NewJobPage(Page):
             if missing and QMessageBox.question(
                     self, APP_TITLE,
                     f"This script imports {', '.join(missing)}, but there is no requirements.txt "
-                    "to install them on Baobab, so the job will probably fail.\n\n"
+                    "to install them on the cluster, so the job will probably fail.\n\n"
                     "Submit anyway?") != QMessageBox.Yes:
                 return
         if spec.uses_nas and not self.win.nas_ok:
@@ -1520,7 +1830,8 @@ class NewJobPage(Page):
         box = QMessageBox(self)
         box.setWindowTitle(APP_TITLE)
         box.setIcon(QMessageBox.Information)
-        box.setText(f"Job {rec['job_id']} submitted.")
+        box.setText(f"Job {rec['job_id']} submitted on "
+                    f"{core.cluster_name(rec.get('cluster', 'baobab'))}.")
         box.setInformativeText("You can follow it on the Jobs page. Results are downloaded "
                                f"automatically when it ends, to:\n{rec['results_local']}")
         go = box.addButton("Go to Jobs", QMessageBox.AcceptRole)
@@ -1588,15 +1899,20 @@ class InteractivePage(Page):
                          "a graphical interface: MATLAB's editor and figures, image viewers... It "
                          "runs while you use it, unlike the jobs submitted from New job.")
         self.win = win
-        self.info: dict = {}
+        self.infos: dict[str, dict] = {}
+        self.ckey = win.active
 
-        card = self.add(Card("Remote desktop on Baobab (Open OnDemand)"))
+        card = self.add(Card("Remote desktop (Open OnDemand)"))
+        self.cl_combo = QComboBox()
+        self.cl_combo.setMaximumWidth(220)
+        self.cl_combo.currentIndexChanged.connect(self.cluster_changed)
+        card.add(row(QLabel("Cluster"), self.cl_combo, QWidget(), stretch_first=False))
         self.open_btn = QPushButton("Open the remote desktop")
         self.open_btn.setObjectName("primary")
         self.open_btn.clicked.connect(self.open_ood)
         card.add(row(hint("Opens Open OnDemand in your browser. Log in with your UNIGE account; "
                           "from home, connect to the UNIGE VPN first."), self.open_btn))
-        self.url = QLineEdit(win.profile.get("ood_url") or core.DEFAULT_PROFILE["ood_url"])
+        self.url = QLineEdit(self.ood_url(self.ckey))
         self.url.editingFinished.connect(self.save_url)
         card.add(row(QLabel("Address"), self.url, stretch_first=False))
         card.body.itemAt(card.body.count() - 1).layout().setStretch(1, 1)
@@ -1615,7 +1931,7 @@ class InteractivePage(Page):
             "<li>When you're done, <b>Delete</b> the session in Open OnDemand to free the node.</li>"
             "</ol>")
         steps.setTextFormat(Qt.RichText)
-        steps.setStyleSheet(f"color: {C['text']};")
+        steps.setObjectName("body")
         card.add(steps)
 
         card = self.add(Card("MATLAB with its interface", number="2"))
@@ -1627,17 +1943,17 @@ class InteractivePage(Page):
                        "which avoids blank or crashing windows in a remote desktop."))
 
         card = self.add(Card("Your files in the session", number="3"))
-        card.add(QLabel("<b>Your scratch space</b>, with the jobs and datasets of this app:"))
+        card.add(label("<b>Your scratch space</b>, with the jobs and datasets of this app:", "body"))
         self.scratch_row = CopyRow()
         card.add(self.scratch_row)
-        self.jobs_label = QLabel("<b>Results of your latest jobs</b>, to open them without "
-                                 "downloading anything:")
+        self.jobs_label = label("<b>Results of your latest jobs</b>, to open them without "
+                                "downloading anything:", "body")
         card.add(self.jobs_label)
         self.job_rows = [CopyRow() for _ in range(3)]
         for r_ in self.job_rows:
             card.add(r_)
-        card.add(QLabel("<b>The lab NAS</b>: in the file manager, type this in the address bar "
-                        "(log in with your ISIS account if asked):"))
+        card.add(label("<b>The lab NAS</b>: in the file manager, type this in the address bar "
+                       "(log in with your ISIS account if asked):", "body"))
         self.smb_row = CopyRow()
         card.add(self.smb_row)
         card.add(label("MATLAB can't open smb:// addresses. Once the share is open in the file "
@@ -1650,20 +1966,61 @@ class InteractivePage(Page):
         self.finish()
         self.refresh()
 
+    @property
+    def info(self) -> dict:
+        return self.infos.get(self.ckey, {})
+
+    def ood_url(self, key: str) -> str:
+        p = self.win.profile
+        own = (p.get("ood_urls") or {}).get(key)
+        if own:
+            return own
+        if key == "baobab" and p.get("ood_url"):
+            return p["ood_url"]
+        return core.CLUSTERS[key]["ood"]
+
+    def cluster_changed(self, _i=None):
+        key = self.cl_combo.currentData()
+        if not key or key == self.ckey:
+            return
+        self.ckey = key
+        self.url.setText(self.ood_url(key))
+        self.refresh()
+        if key not in self.infos:
+            self.load_info(key)
+
     def save_url(self):
-        self.win.profile["ood_url"] = self.url.text().strip() or core.DEFAULT_PROFILE["ood_url"]
+        urls = dict(self.win.profile.get("ood_urls") or {})
+        url = self.url.text().strip()
+        if url and url != core.CLUSTERS[self.ckey]["ood"]:
+            urls[self.ckey] = url
+        else:
+            urls.pop(self.ckey, None)
+        self.win.profile["ood_urls"] = urls
         self.win.save_profile()
 
     def open_ood(self):
         self.save_url()
-        QDesktopServices.openUrl(QUrl(self.win.profile["ood_url"]))
+        QDesktopServices.openUrl(QUrl(self.ood_url(self.ckey)))
 
     def refresh(self):
         p = self.win.profile
+        keys = self.win.enabled_clusters()
+        if self.ckey not in keys:
+            self.ckey = keys[0]
+        self.cl_combo.blockSignals(True)
+        self.cl_combo.clear()
+        for k in keys:
+            self.cl_combo.addItem(core.cluster_name(k), k)
+        self.cl_combo.setCurrentIndex(keys.index(self.ckey))
+        self.cl_combo.blockSignals(False)
+        self.cl_combo.setEnabled(len(keys) > 1)
+        self.url.setText(self.ood_url(self.ckey))
         self.matlab_cmd.set(f"module load {p['matlab_module']} && matlab -softwareopengl")
-        scratch = self.info.get("scratch") or self.win.conn.scratch
-        self.scratch_row.set(scratch or "(connect to Baobab to see your path)")
-        jobs = [j for j in self.win.registry.jobs if j.get("job_dir")][:3]
+        scratch = self.info.get("scratch") or self.win.conn_for(self.ckey).scratch
+        self.scratch_row.set(scratch or "(connect to this cluster to see your path)")
+        jobs = [j for j in self.win.registry.jobs if j.get("job_dir")
+                and j.get("cluster", "baobab") == self.ckey][:3]
         self.jobs_label.setVisible(bool(jobs))
         for r_, j in zip(self.job_rows, jobs + [None] * 3):
             r_.setVisible(j is not None)
@@ -1678,16 +2035,17 @@ class InteractivePage(Page):
             self.gvfs_row.set(path)
             self.gvfs_example.setText(f"In MATLAB: cd('{path}')")
         else:
-            self.gvfs_row.set("(connect to Baobab to compute your path)")
+            self.gvfs_row.set("(connect to this cluster to compute your path)")
             self.gvfs_example.setText("")
 
-    def load_info(self):
-        if not self.win.conn.alive():
+    def load_info(self, key: str | None = None):
+        key = key or self.ckey
+        conn = self.win.conn_for(key)
+        if not conn.alive():
             return
-        conn = self.win.conn
 
         def done(info):
-            self.info = info
+            self.infos[key] = info
             self.refresh()
         self.win.run_task(lambda _p: core.session_info(conn), on_done=done,
                           on_fail=lambda e: log.warning("session info: %s", e))
@@ -1696,7 +2054,7 @@ class InteractivePage(Page):
 # ── Page: cluster ─────────────────────────────────────────────────────────────
 class ClusterPage(Page):
     def __init__(self, win: "MainWindow"):
-        super().__init__("Cluster", "What Baobab has free right now, for the partitions your "
+        super().__init__("Clusters", "What the clusters have free right now, for the partitions your "
                                     "account can use. Refreshed every 2 minutes.")
         self.win = win
         card = self.add(Card("Partitions"))
@@ -1705,14 +2063,15 @@ class ClusterPage(Page):
         rb.clicked.connect(lambda: win.refresh_status())
         card.head.addWidget(self.updated)
         card.head.addWidget(rb)
-        self.table = self._table(["Partition", "Max time", "Cores free", "Idle nodes",
-                                  "GPUs free", "Jobs waiting"])
+        self.table = self._table(["Cluster", "Partition", "Max time", "Cores free", "Idle nodes",
+                                  "Jobs waiting", "GPUs free"])
         card.add(self.table)
         card = self.add(Card("GPUs by type", "Free now, over all your GPU partitions."))
-        self.gpu_table = self._table(["GPU type", "Good for", "Free", "Total", "Partitions"])
+        self.gpu_table = self._table(["Cluster", "GPU type", "Good for", "Free", "Total",
+                                      "Partitions"])
         card.add(self.gpu_table)
         card = self.add(Card("Your datasets on scratch",
-                             "Data copied to Baobab (from this PC or the NAS) stays on scratch so "
+                             "Data copied to a cluster (from this PC or the NAS) stays on its scratch so "
                              "later jobs start without copying it again. Scratch is shared and "
                              "not backed up: delete what you no longer need."))
         self.ds_info = label("", wrap=False)
@@ -1720,7 +2079,8 @@ class ClusterPage(Page):
         rb2.clicked.connect(self.load_datasets)
         card.head.addWidget(self.ds_info)
         card.head.addWidget(rb2)
-        self.ds_table = self._table(["Dataset", "Source", "Size", "Files", "Last used"])
+        self.ds_table = self._table(["Cluster", "Dataset", "Source", "Size", "Files",
+                                     "Last used"])
         self.ds_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.ds_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.ds_table.setFocusPolicy(Qt.StrongFocus)
@@ -1741,7 +2101,7 @@ class ClusterPage(Page):
             "<b>private-*</b> - your group's own nodes, if it has some: higher priority, up to "
             "7 days.")
         guide.setTextFormat(Qt.RichText)
-        guide.setStyleSheet(f"color: {C['text']}; line-height: 150%;")
+        guide.setObjectName("body")
         card.add(guide)
         self.finish()
 
@@ -1760,13 +2120,30 @@ class ClusterPage(Page):
             hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(len(cols) - 1, QHeaderView.Stretch)
         t.setMinimumHeight(120)
+        t.setWordWrap(True)
+        t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         return t
 
+    @staticmethod
+    def _fit_height(t):
+        t.resizeRowsToContents()
+        t.setFixedHeight(t.horizontalHeader().height() + 6
+                         + sum(t.rowHeight(i) for i in range(t.rowCount())) + 2)
+
     def load_datasets(self):
-        if not self.win.conn.alive():
+        keys = self.win.connected_clusters()
+        if not keys:
             return
         self.ds_info.setText("reading...")
-        conn = self.win.conn
+        conns = {k: self.win.conn_for(k) for k in keys}
+
+        def work(_p):
+            out = []
+            for k, conn in conns.items():
+                for d in core.list_datasets(conn):
+                    d["cluster"] = k
+                    out.append(d)
+            return out
 
         def done(ds):
             self.datasets = ds
@@ -1775,7 +2152,8 @@ class ClusterPage(Page):
             for r, d in enumerate(ds):
                 used = (time.strftime("%Y-%m-%d", time.localtime(d["last_used"]))
                         if d.get("last_used") else "")
-                vals = [d["name"], d.get("source", ""), core.human_size(d.get("total_bytes") or 0),
+                vals = [core.cluster_name(d.get("cluster", "baobab")), d["name"], d.get("source", ""),
+                        core.human_size(d.get("total_bytes") or 0),
                         "" if d.get("files") is None else str(d["files"]), used]
                 for c, v in enumerate(vals):
                     t.setItem(r, c, QTableWidgetItem(v))
@@ -1783,7 +2161,7 @@ class ClusterPage(Page):
                              + sum(t.rowHeight(i) for i in range(t.rowCount())) + 2)
             total = sum(d.get("total_bytes") or 0 for d in ds)
             self.ds_info.setText(f"{len(ds)} dataset(s), {core.human_size(total)}")
-        self.win.run_task(lambda _p: core.list_datasets(conn), on_done=done,
+        self.win.run_task(work, on_done=done,
                           on_fail=lambda e: self.ds_info.setText(error_text(e)))
 
     def delete_dataset(self):
@@ -1793,7 +2171,8 @@ class ClusterPage(Page):
             return
         d = self.datasets[rows[0].row()]
         busy = [j["job_id"] for j in self.win.registry.jobs
-                if j.get("data_remote") == d["path"] and j["state"] not in core.FINAL_STATES]
+                if j.get("data_remote") == d["path"] and j["state"] not in core.FINAL_STATES
+                and j.get("cluster", "baobab") == d.get("cluster", "baobab")]
         if busy:
             QMessageBox.warning(self, APP_TITLE, f"This dataset is used by job(s) "
                                 f"{', '.join(busy)}, which have not finished.")
@@ -1801,11 +2180,11 @@ class ClusterPage(Page):
         if QMessageBox.question(
                 self, APP_TITLE,
                 f"Delete {d['name']} ({core.human_size(d.get('total_bytes') or 0)}) from your "
-                f"scratch space on Baobab?\n\nSource: {d.get('source', '?')}\nYour original data "
+                f"scratch space on {core.cluster_name(d.get('cluster', 'baobab'))}?\n\nSource: {d.get('source', '?')}\nYour original data "
                 "(on this PC or the NAS) is not touched; a later job copies it again if "
                 "needed.") != QMessageBox.Yes:
             return
-        conn = self.win.conn
+        conn = self.win.conn_for(d.get("cluster", "baobab"))
         self.win.run_task(lambda _p: core.delete_dataset(conn, d["path"]),
                           on_done=lambda _r: self.load_datasets())
 
@@ -1816,44 +2195,45 @@ class ClusterPage(Page):
             ratio = p["cpus_free"] / max(p["cpus_total"], 1)
             gpus = ", ".join(f"{k} {p['gpu_free'].get(k, 0)}/{n}"
                              for k, n in sorted(p["gpu_total"].items())) or "-"
-            vals = [p["name"] + ("  (private)" if p["kind"] == "private" else ""),
+            vals = [core.cluster_name(p.get("cluster", "baobab")),
+                    p["name"] + ("  (private)" if p["kind"] == "private" else ""),
                     core.human_duration(p["limit_s"]),
                     f"{fmt_int(p['cpus_free'])} / {fmt_int(p['cpus_total'])}  ({ratio:.0%})",
-                    f"{p['nodes_idle']} / {p['nodes_total']}", gpus, str(p["waiting"])]
+                    f"{p['nodes_idle']} / {p['nodes_total']}", str(p["waiting"]), gpus]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
-                if c == 2:
+                if c == 3:
                     it.setBackground(QColor(C["ok_soft"] if ratio > 0.25 else
                                             C["warn_soft"] if ratio > 0.05 else C["err_soft"]))
                 t.setItem(r, c, it)
-        t.setFixedHeight(t.horizontalHeader().height() + 4
-                         + sum(t.rowHeight(i) for i in range(t.rowCount())))
-        per_type: dict[str, list] = {}
+        self._fit_height(t)
+        per_type: dict[tuple, list] = {}
         for p in parts:
             for k, n in p["gpu_total"].items():
-                e = per_type.setdefault(k, [0, 0, []])
+                e = per_type.setdefault((p.get("cluster", "baobab"), k), [0, 0, []])
                 if p["kind"] != "private":        # shared partitions include every node
                     e[0] = max(e[0], p["gpu_free"].get(k, 0))
                     e[1] = max(e[1], n)
                 e[2].append(p["name"])
         g = self.gpu_table
         g.setRowCount(len(per_type))
-        for r, (k, (free, total, names)) in enumerate(sorted(per_type.items())):
-            vals = [k, GPU_LABELS.get(k, "").split(" - ")[-1], str(free), str(total),
-                    ", ".join(names)]
+        order = {k: i for i, k in enumerate(core.CLUSTERS)}
+        for r, ((cl, k), (free, total, names)) in enumerate(
+                sorted(per_type.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1]))):
+            vals = [core.cluster_name(cl), k, GPU_LABELS.get(k, "").split(" - ")[-1], str(free),
+                    str(total), ", ".join(names)]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
-                if c == 2:
+                if c == 3:
                     it.setBackground(QColor(C["ok_soft"] if free else C["err_soft"]))
                 g.setItem(r, c, it)
-        g.setFixedHeight(g.horizontalHeader().height() + 4
-                         + sum(g.rowHeight(i) for i in range(g.rowCount())))
+        self._fit_height(g)
         self.updated.setText("updated " + QTime.currentTime().toString("HH:mm"))
 
 
 # ── Page: jobs ────────────────────────────────────────────────────────────────
 class JobsPage(Page):
-    COLS = ["Job ID", "Name", "State", "Details", "Used", "Submitted", "Results"]
+    COLS = ["Job ID", "Name", "State", "Details", "Used", "Submitted", "Results", "Cluster"]
 
     def __init__(self, win: "MainWindow"):
         super().__init__("Jobs", "Your submitted jobs. Results are downloaded and verified "
@@ -1897,12 +2277,11 @@ class JobsPage(Page):
         self.b_nas.clicked.connect(self.retry_nas)
         self.b_remove = QPushButton("Remove from list")
         self.b_remove.clicked.connect(self.remove_selected)
-        btns = QHBoxLayout()
-        for b in (self.b_log, self.b_dl, self.b_open, self.b_nas, self.b_cancel):
+        btn_box = QWidget()
+        btns = FlowLayout(btn_box)                 # wraps onto a second line when narrow
+        for b in (self.b_log, self.b_dl, self.b_open, self.b_nas, self.b_cancel, self.b_remove):
             btns.addWidget(b)
-        btns.addStretch(1)
-        btns.addWidget(self.b_remove)
-        card.add(btns)
+        card.add(btn_box)
         self.phase = hint("")
         self.bar = QProgressBar()
         self.file_label = hint("")
@@ -1949,11 +2328,11 @@ class JobsPage(Page):
             used = (f"{u['peak_mem_gb']:g} GB peak · {u['cpu_eff']:.0%} of {u['cpus']} CPU"
                     if u else "")
             vals = [j["job_id"], j["name"], j["state"], j.get("detail", ""), used,
-                    j.get("submitted", ""), res]
+                    j.get("submitted", ""), res, core.cluster_name(j.get("cluster", "baobab"))]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(str(v))
                 if c == 2:
-                    it.setBackground(QColor(STATE_COLORS.get(j["state"], "#ffffff")))
+                    it.setBackground(QColor(state_color(j["state"])))
                 if c == 4 and u:
                     it.setToolTip(f"Requested {j.get('cpus', '?')} CPU(s) and "
                                   f"{j.get('mem_gb', '?')} GB; ran "
@@ -1991,11 +2370,12 @@ class JobsPage(Page):
         j = self.selected()
         if not j:
             return
-        if not self.win.conn.alive():
-            self.view.setPlainText("Not connected.")
+        conn = self.win.conn_for(j)
+        if not conn.alive():
+            self.view.setPlainText(f"Not connected to "
+                                   f"{core.cluster_name(j.get('cluster', 'baobab'))}.")
             return
         self.view.setPlainText(f"Loading the log of job {j['job_id']}...")
-        conn = self.win.conn
         self.win.run_task(lambda _p: core.tail_log(conn, j["job_dir"]),
                           on_done=lambda text: self.view.setPlainText(
                               f"Job {j['job_id']} - {j['name']}\n{j['job_dir']}\n\n{text}"),
@@ -2018,9 +2398,9 @@ class JobsPage(Page):
 
     def retry_nas(self):
         j = self.selected()
-        if not j or not self.win.require_nas(self.retry_nas):
+        if not j or not self.win.require_nas(self.retry_nas, j.get("cluster", "baobab")):
             return
-        conn = self.win.conn
+        conn = self.win.conn_for(j)
 
         def done(uid):
             self.win.registry.update(j["job_id"], upload_id=uid, upload_state="running",
@@ -2036,7 +2416,7 @@ class JobsPage(Page):
         if QMessageBox.question(self, APP_TITLE, f"Cancel job {j['job_id']} ({j['name']})?") \
                 != QMessageBox.Yes:
             return
-        conn = self.win.conn
+        conn = self.win.conn_for(j)
         self.win.run_task(lambda _p: core.cancel_job(conn, j["job_id"], j),
                           on_done=lambda _r: QTimer.singleShot(2_000, lambda: self.win.poll(True)))
 
@@ -2046,7 +2426,7 @@ class JobsPage(Page):
             return
         if QMessageBox.question(
                 self, APP_TITLE,
-                f"Remove job {j['job_id']} from this list?\n\nNothing is deleted: files on Baobab "
+                f"Remove job {j['job_id']} from this list?\n\nNothing is deleted: files on the cluster "
                 "and downloaded results stay where they are.") != QMessageBox.Yes:
             return
         self.win.registry.remove(j["job_id"])
@@ -2062,7 +2442,11 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(ICON_FILE)))
         self.resize(1180, 860)
         self.profile = core.load_profile()
-        self.conn = core.Connection()
+        self.conns: dict[str, core.Connection] = {k: core.Connection() for k in core.CLUSTERS}
+        self.active = self.enabled_clusters()[0]
+        self.cstate: dict[str, str] = {}            # per-cluster connection status
+        self.cluster_parts: dict[str, list] = {}
+        self.nas_st: dict[str, dict] = {}
         self.registry = core.JobRegistry()
         self.cache = core.HashCache()
         self.partitions: list[dict] = []
@@ -2071,10 +2455,9 @@ class MainWindow(QMainWindow):
         self._signals: set = set()
         self.submitting = False
         self.downloading: set[str] = set()
-        self.polling = False
-        self.status_busy = False
-        self.nas_ok = False
-        self.nas_renewed = 0.0
+        self.polling: set[str] = set()
+        self.status_busy: set[str] = set()
+        self.nas_renewed: dict[str, float] = {}
 
         # sidebar
         side = QFrame()
@@ -2085,16 +2468,16 @@ class MainWindow(QMainWindow):
         sv.setSpacing(4)
         brand = QHBoxLayout()
         logo = QLabel()
-        png = APP_DIR_CODE / "baobab.png"
+        png = APP_DIR_CODE / "forest.png"
         if png.exists():
             logo.setPixmap(QPixmap(str(png)).scaled(36, 36, Qt.KeepAspectRatio,
                                                     Qt.SmoothTransformation))
         brand.addWidget(logo)
         bt = QVBoxLayout()
         bt.setSpacing(0)
-        b1 = QLabel("Baobab HPC")
+        b1 = QLabel(APP_TITLE)
         b1.setObjectName("brand")
-        b2 = QLabel("UNIGE cluster")
+        b2 = QLabel("UNIGE clusters")
         b2.setObjectName("brandsub")
         bt.addWidget(b1)
         bt.addWidget(b2)
@@ -2115,7 +2498,7 @@ class MainWindow(QMainWindow):
         self.nav: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for key, text in (("new", "New job"), ("jobs", "Jobs"), ("cluster", "Cluster"),
+        for key, text in (("new", "New job"), ("jobs", "Jobs"), ("cluster", "Clusters"),
                           ("interactive", "Interactive"), ("settings", "Settings")):
             self.stack.addWidget(self.pages[key])
             b = QPushButton(text)
@@ -2154,12 +2537,46 @@ class MainWindow(QMainWindow):
         self.status_timer.timeout.connect(self.refresh_status)
         self.status_timer.start(STATUS_MS)
 
+        try:                                      # follow Windows' light / dark setting live
+            QApplication.styleHints().colorSchemeChanged.connect(self.system_theme_changed)
+        except AttributeError:
+            pass
         p = self.profile
         if p["username"] and p["key_path"] and Path(p["key_path"]).expanduser().exists():
             self.go("new" if p.get("last_project") else "settings")
             QTimer.singleShot(200, self.connect_cluster)
         else:
             self.go("settings")
+
+    # appearance
+    def apply_theme(self, choice: str | None = None):
+        if choice is not None:
+            self.profile["theme"] = choice
+            self.save_profile()
+        set_theme(self.profile.get("theme", "system"))
+        self.restyle()
+
+    def system_theme_changed(self, *_):
+        if self.profile.get("theme", "system") == "system":
+            self.apply_theme()
+
+    def restyle(self):
+        """Redraw what carries colours of its own (badges, tables, status texts)."""
+        for card in self.findChildren(Card):
+            eff = card.graphicsEffect()
+            if eff is not None:
+                eff.setColor(QColor(*C["shadow"]))
+        self.update_conn_display()
+        self.show_nas_status()
+        self.jobs_page.refresh_table()
+        if self.partitions:
+            self.cluster_page.fill(self.partitions)
+            self.job_page.layout_tiles()
+            self.job_page.update_fits()
+        for w in self.findChildren(QLabel):
+            if w.objectName() in ("hint", "warn", "ok", "body", "sectionhead", "tiletag"):
+                w.style().unpolish(w)
+                w.style().polish(w)
 
     def go(self, key: str):
         if key == "interactive":
@@ -2206,40 +2623,86 @@ class MainWindow(QMainWindow):
         except OSError:
             log.exception("Could not save profile")
 
-    # connection
-    def connect_cluster(self, passphrase: str | None = None, accept: str | None = None):
+    # connections: one per enabled cluster
+    @property
+    def conn(self) -> core.Connection:
+        """Connection of the active cluster (the one picked in 'Where to run')."""
+        return self.conns[self.active]
+
+    def enabled_clusters(self) -> list[str]:
+        on = self.profile.get("clusters") or ["baobab"]
+        return [k for k in core.CLUSTERS if k in on] or ["baobab"]
+
+    def connected_clusters(self) -> list[str]:
+        return [k for k in self.enabled_clusters() if self.conns[k].alive()]
+
+    def conn_for(self, rec_or_key) -> core.Connection:
+        key = rec_or_key if isinstance(rec_or_key, str) else rec_or_key.get("cluster", "baobab")
+        return self.conns.setdefault(key, core.Connection())
+
+    def set_active(self, key: str):
+        if key in self.conns and key != self.active:
+            self.active = key
+            self.show_nas_status()
+            self.interactive_page.refresh()
+
+    def connect_cluster(self, passphrase: str | None = None, accept: str | None = None,
+                        only: str | None = None):
         self.save_profile()
         self._passphrase = passphrase
-        prof = dict(self.profile)
-        t = self.settings_page
-        t.connect_btn.setEnabled(False)
-        t.status.setText("Connecting...")
-        set_kind(t.status, "hint")
-        self.set_pill(False, "Connecting...")
-        self.run_task(lambda _p: self.conn.connect(prof, passphrase, accept),
-                      on_done=self.connected, on_fail=lambda e: self.connect_failed(e))
+        if self.active not in self.enabled_clusters():
+            self.active = self.enabled_clusters()[0]
+        for k in ([only] if only else self.enabled_clusters()):
+            self.connect_one(k, passphrase, accept if only else None)
 
-    def connected(self, hostname: str):
+    def connect_one(self, k: str, passphrase=None, accept=None):
+        prof = dict(self.profile, host=core.CLUSTERS[k]["host"], cluster=k)
+        self.cstate[k] = "connecting..."
+        self.update_conn_display()
+        conn = self.conns.setdefault(k, core.Connection())
+        self.run_task(lambda _p: conn.connect(prof, passphrase, accept),
+                      on_done=lambda h, k=k: self.connected(k, h),
+                      on_fail=lambda e, k=k: self.connect_failed(k, e))
+
+    def update_conn_display(self):
         t = self.settings_page
-        t.connect_btn.setEnabled(True)
-        t.connect_btn.setText("Reconnect")
-        t.status.setText(f"Connected to {hostname} - scratch: {self.conn.scratch}")
-        set_kind(t.status, "ok")
-        self.set_pill(True, f"{self.profile['username']} @ {hostname}")
-        self.load_cluster_info()
-        self.refresh_nas_status()
-        self.interactive_page.load_info()
+        lines, ok = [], []
+        for k in self.enabled_clusters():
+            st = self.cstate.get(k, "not connected")
+            good = self.conns[k].alive()
+            if good:
+                ok.append(core.cluster_name(k))
+            color = C["ok"] if good else (C["muted"] if "connecting" in st else C["err"])
+            lines.append(f"<span style='color:{color}'><b>{core.cluster_name(k)}</b>: {st}</span>")
+        t.status.setText("<br>".join(lines))
+        t.status.setTextFormat(Qt.RichText)
+        busy = any("connecting" in self.cstate.get(k, "") for k in self.enabled_clusters())
+        t.connect_btn.setEnabled(not busy)
+        t.connect_btn.setText("Reconnect" if ok else "Connect")
+        if ok:
+            self.set_pill(True, f"{self.profile['username']} · {', '.join(ok)}")
+        else:
+            self.set_pill(False, "Connecting..." if busy else "Not connected")
+        relayout(t.status)
+
+    def connected(self, k: str, hostname: str):
+        self.cstate[k] = f"connected to {hostname}, scratch {self.conns[k].scratch}"
+        if not self.conns[self.active].alive():
+            self.active = k
+        self.update_conn_display()
+        self.load_cluster_info(k)
+        self.refresh_nas_status(k)
+        self.interactive_page.load_info(k)
+        self.refresh_status()
         self.poll(force=True)
 
-    def connect_failed(self, e):
-        t = self.settings_page
-        t.connect_btn.setEnabled(True)
-        self.set_pill(False)
+    def connect_failed(self, k: str, e):
+        name = core.cluster_name(k)
         if isinstance(e, core.UnknownHostKey):
             box = QMessageBox(self)
             box.setWindowTitle(APP_TITLE)
             box.setIcon(QMessageBox.Warning)
-            box.setText(f"First connection to {e.host}")
+            box.setText(f"First connection to {name} ({e.host})")
             box.setInformativeText(
                 "This server is not one the app knows. Check that the fingerprint below matches "
                 "the one published by the cluster's administrators before trusting it:\n\n"
@@ -2249,127 +2712,159 @@ class MainWindow(QMainWindow):
             box.addButton("Cancel", QMessageBox.RejectRole)
             box.exec()
             if box.clickedButton() is trust:
-                self.connect_cluster(getattr(self, "_passphrase", None), e.fingerprint)
+                self.connect_one(k, getattr(self, "_passphrase", None), e.fingerprint)
                 return
-            t.status.setText(f"Not connected: {e.host} was not trusted.")
-            set_kind(t.status, "warn")
+            self.cstate[k] = "not trusted"
+            self.update_conn_display()
             return
         if isinstance(e, core.PassphraseRequired):
+            waiting = getattr(self, "_pass_waiting", None)
+            if waiting is not None:              # a prompt is already open for another cluster
+                waiting.add(k)
+                return
+            self._pass_waiting = {k}
             pw, ok = QInputDialog.getText(self, APP_TITLE, "Passphrase of your SSH key:",
                                           QLineEdit.Password)
+            todo, self._pass_waiting = self._pass_waiting, None
             if ok and pw:
-                self.connect_cluster(pw)
+                self._passphrase = pw
+                for kk in todo:
+                    self.connect_one(kk, pw)
                 return
-        t.status.setText(error_text(e))
-        set_kind(t.status, "warn")
-        self.go("settings")
+        self.cstate[k] = error_text(e)
+        self.update_conn_display()
+        if not self.connected_clusters():
+            self.go("settings")
 
-    # lab NAS (Kerberos ticket on Baobab)
-    def show_nas_status(self, st: dict):
-        self.nas_ok = st["valid"]
+    # lab NAS: one Kerberos ticket per cluster (each has its own home)
+    @property
+    def nas_ok(self) -> bool:
+        return bool(self.nas_st.get(self.active, {}).get("valid"))
+
+    def show_nas_status(self):
         lab = self.settings_page.nas_status
-        if st["valid"]:
-            lab.setText(f"Logged in to the NAS until {st['expires']}; renewed automatically "
-                        f"until {st['renew_until']}.")
-            set_kind(lab, "ok")
-            self.settings_page.nas_btn.setText("Log in again")
-        else:
-            lab.setText("Not logged in to the NAS. You'll be asked for your ISIS password when "
-                        "a job or the NAS browser needs it.")
-            set_kind(lab, "hint")
-            self.settings_page.nas_btn.setText("Log in to the NAS")
+        lines = []
+        for k in self.connected_clusters():
+            st = self.nas_st.get(k, {})
+            if st.get("valid"):
+                lines.append(f"<span style='color:{C['ok']}'><b>{core.cluster_name(k)}</b>: logged "
+                             f"in until {st['expires']}, renewed automatically until "
+                             f"{st['renew_until']}</span>")
+            else:
+                lines.append(f"<b>{core.cluster_name(k)}</b>: not logged in (you'll be asked for "
+                             "your ISIS password when needed)")
+        lab.setTextFormat(Qt.RichText)
+        lab.setText("<br>".join(lines) or "Connect to a cluster first.")
+        set_kind(lab, "hint")
+        self.settings_page.nas_btn.setText(
+            f"Log in again on {core.cluster_name(self.active)}" if self.nas_ok
+            else f"Log in to the NAS on {core.cluster_name(self.active)}")
+        relayout(lab)
 
-    def refresh_nas_status(self, renew: bool = False):
-        if not self.conn.alive():
-            return
-        conn = self.conn
+    def refresh_nas_status(self, key: str | None = None, renew: bool = False):
+        for k in ([key] if key else self.connected_clusters()):
+            conn = self.conns[k]
+            if not conn.alive():
+                continue
 
-        def work(_p):
-            if renew:
-                core.krb_renew(conn)
-            return core.krb_status(conn)
+            def work(_p, conn=conn):
+                if renew:
+                    core.krb_renew(conn)
+                return core.krb_status(conn)
 
-        def done(st):
-            if renew:
-                self.nas_renewed = time.time()
-            self.show_nas_status(st)
-        self.run_task(work, on_done=done, on_fail=lambda e: log.warning("NAS status: %s", e))
+            def done(st, k=k):
+                if renew:
+                    self.nas_renewed[k] = time.time()
+                self.nas_st[k] = st
+                self.show_nas_status()
+            self.run_task(work, on_done=done, on_fail=lambda e: log.warning("NAS status: %s", e))
 
     def nas_login(self, then=None):
         if not self.conn.alive():
-            QMessageBox.warning(self, APP_TITLE, "Connect to Baobab first.")
+            QMessageBox.warning(self, APP_TITLE, "Connect to the cluster first.")
             return
         self.save_profile()
-        user = self.profile["username"]
+        k, user = self.active, self.profile["username"]
         pw, ok = QInputDialog.getText(
             self, APP_TITLE,
-            f"ISIS password of {user}, to let Baobab access the lab NAS.\n"
-            "It is passed to Kerberos on Baobab and never stored.", QLineEdit.Password)
+            f"ISIS password of {user}, to let {core.cluster_name(k)} access the lab NAS.\n"
+            "It is passed to Kerberos on the cluster and never stored.", QLineEdit.Password)
         if not ok or not pw:
             return
         conn, realm = self.conn, self.profile["kerberos_realm"]
         self.settings_page.nas_status.setText("Logging in to the NAS...")
 
         def done(st):
-            self.nas_renewed = time.time()
-            self.show_nas_status(st)
+            self.nas_renewed[k] = time.time()
+            self.nas_st[k] = st
+            self.show_nas_status()
             if then:
                 then()
 
         def failed(e):
-            self.show_nas_status({"valid": False})
+            self.nas_st[k] = {"valid": False}
+            self.show_nas_status()
             QMessageBox.warning(self, APP_TITLE, error_text(e))
         self.run_task(lambda _p: core.krb_login(conn, pw, realm), on_done=done, on_fail=failed)
 
-    def require_nas(self, retry) -> bool:
-        """True if the NAS can be used now; otherwise asks to log in, then calls retry."""
+    def require_nas(self, retry, key: str | None = None) -> bool:
+        """True if the NAS can be used now from the cluster; otherwise asks to log in, then
+        calls retry."""
+        if key and key != self.active:
+            self.set_active(key)
         if not self.conn.alive():
-            QMessageBox.warning(self, APP_TITLE, "Connect to Baobab first.")
+            QMessageBox.warning(self, APP_TITLE, "Connect to the cluster first.")
             return False
         if self.nas_ok:
             return True
         self.nas_login(then=retry)
         return False
 
-    def load_cluster_info(self):
-        if not self.conn.alive():
+    def load_cluster_info(self, key: str | None = None):
+        k = key or self.active
+        conn = self.conns[k]
+        if not conn.alive():
             return
-        conn = self.conn
 
         def work(_p):
             return core.get_matlab_modules(conn), core.get_python_versions(conn)
 
         def done(res):
             matlab, python = res
-            self.settings_page.fill_versions(matlab, python)
-            if not self.profile.get("python_modules", "").endswith(self.profile["python_version"]):
-                self.resolve_python()
-            else:
+            self.versions = getattr(self, "versions", {})
+            self.versions[k] = res
+            if k == self.active or len(self.versions) == 1:
+                self.settings_page.fill_versions(matlab, python)
                 self.settings_page.show_python_line()
 
         self.run_task(work, on_done=done, on_fail=lambda e: log.warning("versions: %s", e))
-        self.refresh_status()
 
     def refresh_status(self):
-        if self.status_busy or not self.conn.alive():
-            return
-        self.status_busy = True
-        conn = self.conn
+        for k in self.connected_clusters():
+            if k in self.status_busy:
+                continue
+            self.status_busy.add(k)
+            conn = self.conns[k]
 
-        def done(parts):
-            self.status_busy = False
-            self.partitions = parts
-            self.job_page.fill_partitions(parts)
-            self.cluster_page.fill(parts)
-            if not self.cluster_page.datasets:
-                self.cluster_page.load_datasets()
+            def done(parts, k=k):
+                self.status_busy.discard(k)
+                for p_ in parts:
+                    p_["cluster"] = k
+                self.cluster_parts[k] = parts
+                self.partitions = [p_ for kk in self.enabled_clusters()
+                                   for p_ in self.cluster_parts.get(kk, [])]
+                self.job_page.fill_partitions(self.partitions)
+                self.cluster_page.fill(self.partitions)
+                if not self.cluster_page.datasets:
+                    self.cluster_page.load_datasets()
 
-        def failed(e):
-            self.status_busy = False
-            self.statusBar().showMessage("Could not read the cluster state: " + error_text(e),
-                                         10_000)
+            def failed(e, k=k):
+                self.status_busy.discard(k)
+                self.statusBar().showMessage(f"Could not read the state of "
+                                             f"{core.cluster_name(k)}: " + error_text(e), 10_000)
 
-        self.run_task(lambda _p: core.get_cluster_status(conn), on_done=done, on_fail=failed)
+            self.run_task(lambda _p, conn=conn: core.get_cluster_status(conn),
+                          on_done=done, on_fail=failed)
 
     def resolve_python(self):
         if not self.conn.alive():
@@ -2384,37 +2879,43 @@ class MainWindow(QMainWindow):
         self.run_task(lambda _p: core.resolve_module_load(conn, ver), on_done=done,
                       on_fail=lambda e: None)
 
-    # job monitoring
+    # job monitoring, on every connected cluster
     def poll(self, force: bool = False):
-        if self.polling or not self.conn.alive():
-            return
-        if self.nas_ok and time.time() - self.nas_renewed > 1800:   # keep the ticket fresh
-            self.refresh_nas_status(renew=True)
-        recs = [dict(j) for j in self.registry.jobs if j["state"] not in core.FINAL_STATES]
-        if not recs:
-            self.download_finished_jobs()
-            return
-        self.polling = True
-        conn = self.conn
+        for k in self.connected_clusters():         # keep NAS tickets fresh
+            if self.nas_st.get(k, {}).get("valid") and \
+                    time.time() - self.nas_renewed.get(k, 0) > 1800:
+                self.refresh_nas_status(k, renew=True)
+        for k in self.connected_clusters():
+            if k in self.polling:
+                continue
+            recs = [dict(j) for j in self.registry.jobs
+                    if j["state"] not in core.FINAL_STATES and j.get("cluster", "baobab") == k]
+            if not recs:
+                continue
+            self.polling.add(k)
+            conn = self.conns[k]
 
-        def done(updates):
-            self.polling = False
-            for jid, up in updates.items():
-                self.registry.update(jid, **up)
-            self.jobs_page.updated.setText("updated " + QTime.currentTime().toString("HH:mm"))
-            self.jobs_page.refresh_table()
-            self.download_finished_jobs()
+            def done(updates, k=k):
+                self.polling.discard(k)
+                for jid, up in updates.items():
+                    self.registry.update(jid, **up)
+                self.jobs_page.updated.setText("updated " + QTime.currentTime().toString("HH:mm"))
+                self.jobs_page.refresh_table()
+                self.download_finished_jobs()
 
-        def failed(e):
-            self.polling = False
-            self.statusBar().showMessage("Could not check jobs: " + error_text(e), 10_000)
+            def failed(e, k=k):
+                self.polling.discard(k)
+                self.statusBar().showMessage(f"Could not check jobs on {core.cluster_name(k)}: "
+                                             + error_text(e), 10_000)
 
-        self.run_task(lambda _p: core.poll_jobs(conn, recs), on_done=done, on_fail=failed)
+            self.run_task(lambda _p, conn=conn, recs=recs: core.poll_jobs(conn, recs),
+                          on_done=done, on_fail=failed)
+        self.download_finished_jobs()
 
     def fetch_usage(self, job_id: str):
         self.registry.update(job_id, usage_checked=True)
-        conn = self.conn
         rec = self.registry.get(job_id) or {}
+        conn = self.conn_for(rec)
         ids = ",".join(rec.get("chain_ids") or [job_id])
 
         def done(u):
@@ -2425,13 +2926,15 @@ class MainWindow(QMainWindow):
                       on_fail=lambda e: log.warning("usage of %s: %s", job_id, e))
 
     def download_finished_jobs(self):
-        if self.conn.alive():
-            for j in list(self.registry.jobs):
-                if j["state"] in core.FINAL_STATES and not j.get("usage_checked"):
-                    self.fetch_usage(j["job_id"])
-        if not self.profile.get("auto_download", True) or not self.conn.alive():
+        for j in list(self.registry.jobs):
+            if j["state"] in core.FINAL_STATES and not j.get("usage_checked") \
+                    and self.conn_for(j).alive():
+                self.fetch_usage(j["job_id"])
+        if not self.profile.get("auto_download", True):
             return
         for j in list(self.registry.jobs):
+            if not self.conn_for(j).alive():
+                continue
             if j["state"] in core.FINAL_STATES and j.get("results_to_pc") is False \
                     and not j.get("downloaded"):
                 self.registry.update(j["job_id"], downloaded=True, download_note="on the NAS")
@@ -2444,12 +2947,14 @@ class MainWindow(QMainWindow):
         rec = self.registry.get(job_id)
         if not rec or job_id in self.downloading:
             return
-        if not self.conn.alive():
-            QMessageBox.warning(self, APP_TITLE, "Not connected to Baobab.")
+        conn = self.conn_for(rec)
+        if not conn.alive():
+            QMessageBox.warning(self, APP_TITLE, f"Not connected to "
+                                f"{core.cluster_name(rec.get('cluster', 'baobab'))}.")
             return
         self.downloading.add(job_id)
         self.jobs_page.refresh_table()
-        conn, jp = self.conn, self.jobs_page
+        jp = self.jobs_page
         rec = dict(rec)
 
         def progress(d):
@@ -2499,7 +3004,8 @@ class MainWindow(QMainWindow):
                 return
         self.save_profile()
         self.cache.save()
-        self.conn.close()
+        for c_ in self.conns.values():
+            c_.close()
         ev.accept()
 
 
@@ -2538,13 +3044,13 @@ def main():
     if os.name == "nt":   # own taskbar entry and icon instead of Python's
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UNIGE.BaobabHPC")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UNIGE.HPCForest")
         except Exception:
             pass
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
     app.setStyle("Fusion")
-    app.setStyleSheet(build_style())
+    set_theme(core.load_profile().get("theme", "system"))
     if ICON_FILE.exists():
         app.setWindowIcon(QIcon(str(ICON_FILE)))
 
@@ -2552,7 +3058,7 @@ def main():
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):
         mark_started()
-        QMessageBox.information(None, APP_TITLE, "Baobab HPC is already open.")
+        QMessageBox.information(None, APP_TITLE, f"{APP_TITLE} is already open.")
         return 0
 
     def excepthook(t, v, tb):
@@ -2579,5 +3085,5 @@ if __name__ == "__main__":
     except BaseException:
         tb = traceback.format_exc()
         logging.getLogger("baobab").critical("Start-up failed\n%s", tb)
-        native_error_box("Baobab HPC could not start:\n\n" + tb)
+        native_error_box("HPC Forest could not start:\n\n" + tb)
         sys.exit(1)

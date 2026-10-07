@@ -1,5 +1,5 @@
 """
-Baobab HPC — core logic (no GUI).
+HPC Forest — core logic (no GUI).
 
 SSH connection, SHA-256-verified transfers, SLURM script generation and job
 tracking for the UNIGE Baobab cluster. Used by baobab_app.py.
@@ -88,11 +88,40 @@ PINNED_HOST_KEYS = {
         "ssh-rsa": "SHA256:tKqp4nljL+EGVKl8T0VF2nS36DkHVFMpLxQOPg/gKvg",
         "ssh-ed25519": "SHA256:R/cy4lk5x8qKwmrIq8R9tiRdneDtorBnqzEynx8OnGI",
     },
+    # the documentation shows the same RSA host key for Yggdrasil
+    "login1.yggdrasil.hpc.unige.ch": {
+        "ssh-rsa": "SHA256:tKqp4nljL+EGVKl8T0VF2nS36DkHVFMpLxQOPg/gKvg",
+    },
 }
+
+# The UNIGE clusters. Each has its own home and scratch; the same account and SSH key
+# work on all of them. Open OnDemand addresses other than Baobab's follow the same
+# pattern but are unverified (editable on the Interactive page).
+CLUSTERS = {
+    "baobab": {"name": "Baobab", "host": "login1.baobab.hpc.unige.ch",
+               "ood": "https://openondemand.baobab.hpc.unige.ch/pun/sys/dashboard"},
+    "yggdrasil": {"name": "Yggdrasil", "host": "login1.yggdrasil.hpc.unige.ch",
+                  "ood": "https://openondemand.yggdrasil.hpc.unige.ch/pun/sys/dashboard"},
+    "bamboo": {"name": "Bamboo", "host": "login1.bamboo.hpc.unige.ch",
+               "ood": "https://openondemand.bamboo.hpc.unige.ch/pun/sys/dashboard"},
+}
+
+
+def cluster_name(key: str) -> str:
+    return CLUSTERS.get(key, {}).get("name", key.capitalize() if key else "?")
 KNOWN_HOSTS_FILE = APP_DIR / "known_hosts"          # servers the user confirmed
 # Only negotiate key types that are pinned, so a pinned server never shows another one
-_UNPINNED_KEY_TYPES = ["ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
-                       "ssh-dss"]
+_ALL_HOST_KEY_ALGS = {"ssh-ed25519": ["ssh-ed25519"],
+                      "ssh-rsa": ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"],
+                      "ecdsa": ["ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"],
+                      "ssh-dss": ["ssh-dss"]}
+_UNPINNED_KEY_TYPES: list = []           # extra algorithms to refuse (tests)
+
+
+def disabled_host_key_algs(host: str) -> list:
+    pinned = PINNED_HOST_KEYS.get(host.lower(), {})
+    off = [a for t, algs in _ALL_HOST_KEY_ALGS.items() if t not in pinned for a in algs]
+    return off + [a for a in _UNPINNED_KEY_TYPES if a not in off]
 
 
 def fingerprint(key) -> str:
@@ -141,6 +170,10 @@ DEFAULT_PROFILE = {
     "kerberos_realm": "ISIS.UNIGE.CH",
     "nas_last_path": "",
     "ood_url": "https://openondemand.baobab.hpc.unige.ch/pun/sys/dashboard",
+    "clusters": ["baobab"],         # clusters to connect to
+    "ood_urls": {},                 # per-cluster Open OnDemand address overrides
+    "favorites": [],                # favorite partitions, "cluster:partition"
+    "theme": "system",              # "light", "dark" or "system"
     "last_project": "",
     "last_data": "",
 }
@@ -293,6 +326,7 @@ class Connection:
         self.passphrase: str | None = None
         self.scratch: str = ""
         self.hostname: str = ""
+        self.key: str = ""                  # cluster key, e.g. "baobab"
         self._lock = threading.RLock()
 
     def connect(self, profile: dict, passphrase: str | None = None,
@@ -316,7 +350,7 @@ class Connection:
                   timeout=20, banner_timeout=30, auth_timeout=30,
                   allow_agent=True, look_for_keys=True)
         if host.lower() in PINNED_HOST_KEYS:
-            kw["disabled_algorithms"] = {"keys": _UNPINNED_KEY_TYPES}
+            kw["disabled_algorithms"] = {"keys": disabled_host_key_algs(host)}
         key_path = profile.get("key_path", "").strip()
         if key_path:
             kp = Path(key_path).expanduser()
@@ -357,6 +391,7 @@ class Connection:
         with self._lock:
             self.close()
             self.client = client
+            self.key = profile.get("cluster", self.key or "baobab")
             self.profile = dict(profile)
             self.passphrase = passphrase        # (the confirmed key is now remembered)
         self.hostname = self.run("hostname")[0].strip()
@@ -817,6 +852,7 @@ class JobSpec:
     results_base: str = ""         # local folder; results go to <base>/<name>_<jobid>
     matlab_module: str = "MATLAB/2022a"
     python_modules: str = "Python/3.12.3"
+    python_version: str = ""       # e.g. "Python/3.12.3": resolved on the target cluster
     cuda_module: str = "CUDA"
     continue_runs: int = 0         # >0: continue after a time-out, up to this many runs
     nas_share: str = ""            # //server/share of the lab NAS
@@ -1301,8 +1337,29 @@ def cancel_job(conn: Connection, job_id: str, rec: dict | None = None):
 
 
 # ── High-level operations ─────────────────────────────────────────────────────
+def adapt_software(conn: Connection, spec: JobSpec, progress=None) -> JobSpec:
+    """Software versions differ between clusters: use the requested ones when this cluster
+    has them, otherwise its newest, and resolve the module line on this cluster."""
+    import dataclasses
+    name = cluster_name(conn.key)
+    if spec.language == "matlab":
+        mods = get_matlab_modules(conn)
+        if mods and spec.matlab_module not in mods:
+            _log(progress, f"{spec.matlab_module} is not installed on {name}: using {mods[0]}")
+            spec = dataclasses.replace(spec, matlab_module=mods[0])
+    elif spec.python_version:
+        vers = get_python_versions(conn)
+        ver = spec.python_version
+        if vers and ver not in vers:
+            _log(progress, f"{ver} is not installed on {name}: using {vers[0]}")
+            ver = vers[0]
+        spec = dataclasses.replace(spec, python_modules=resolve_module_load(conn, ver))
+    return spec
+
+
 def submit_job(conn: Connection, spec: JobSpec, cache: HashCache, progress=None) -> dict:
     validate_spec(spec)
+    spec = adapt_software(conn, spec, progress)
     project = Path(spec.project_dir)
     job_dir = create_job_dir(conn, spec.name)
     _log(progress, f"Job folder on Baobab: {job_dir}")
@@ -1383,7 +1440,7 @@ def submit_job(conn: Connection, spec: JobSpec, cache: HashCache, progress=None)
         _log(progress, f"Results will be copied to the NAS: {nas_dest}")
 
     results_base = spec.results_base or default_results_base(spec.data_dir, spec.project_dir)
-    rec = {"job_id": job_id, "name": spec.name, "job_dir": job_dir,
+    rec = {"job_id": job_id, "cluster": conn.key or "baobab", "name": spec.name, "job_dir": job_dir,
            "data_remote": data_remote, "entry": spec.entry, "partition": spec.partition,
            "project_dir": spec.project_dir, "cpus": spec.cpus, "mem_gb": spec.mem_gb,
            "walltime": spec.walltime, "continue_runs": spec.continue_runs,

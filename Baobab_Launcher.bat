@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title Baobab HPC Launcher
+title HPC Forest Launcher
 cd /d "%~dp0"
 
 set "VENV=%~dp0.venv"
@@ -14,7 +14,7 @@ rem ---------------------------------------------------------------
 if exist "%VPY%" goto :check_deps
 
 echo ==========================================================
-echo    Baobab HPC - first-time setup
+echo    HPC Forest - first-time setup
 echo ==========================================================
 echo.
 
@@ -101,7 +101,7 @@ rem 5. Check the app loads, then start it without a console window
 rem ---------------------------------------------------------------
 :launch
 rem First run: shortcuts with the app icon (desktop, Start menu, this folder)
-if not exist "%~dp0Baobab HPC.lnk" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make_shortcut.ps1" -AppDir "%~dp0." >nul 2>&1
+if not exist "%~dp0HPC Forest.lnk" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make_shortcut.ps1" -AppDir "%~dp0." >nul 2>&1
 rem Qt paths set by other programs (Anaconda, QGIS...) break PySide6
 set "QT_PLUGIN_PATH="
 set "QT_QPA_PLATFORM_PLUGIN_PATH="
@@ -110,7 +110,7 @@ if errorlevel 1 goto :app_fail
 set "APPDATA_DIR=%USERPROFILE%\.baobab_hpc"
 if exist "%APPDATA_DIR%\started.txt" del "%APPDATA_DIR%\started.txt" >nul 2>&1
 start "" "%VPYW%" "%~dp0baobab_app.py"
-echo Opening Baobab HPC ...
+echo Opening HPC Forest ...
 rem Wait up to 45 s for the window to confirm it opened
 for /l %%i in (1,1,45) do (
     if exist "%APPDATA_DIR%\started.txt" exit /b 0

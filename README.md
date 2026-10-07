@@ -1,8 +1,8 @@
-# Baobab HPC — setup and user guide
+# HPC Forest — setup and user guide
 
-> **Not an official UNIGE tool.** Baobab HPC is an independent project and is not developed, endorsed or supported by the University of Geneva or its HPC team. For questions about the cluster itself, see the [official documentation](https://doc.eresearch.unige.ch/hpc/start); for questions about this app, open an issue in this repository.
+> **Not an official UNIGE tool.** HPC Forest is an independent project and is not developed, endorsed or supported by the University of Geneva or its HPC team. For questions about the cluster itself, see the [official documentation](https://doc.eresearch.unige.ch/hpc/start); for questions about this app, open an issue in this repository.
 
-A Windows desktop app to run MATLAB and Python jobs on the UNIGE **Baobab** cluster. You choose your code, your data and the resources; the app copies everything to the cluster, submits the job, follows it, and brings the results back next to your data. Every transferred file is verified with a SHA-256 checksum.
+A Windows desktop app to run MATLAB and Python jobs on the UNIGE HPC clusters: **Baobab**, **Yggdrasil** and **Bamboo**. You choose your code, your data and the resources; the app copies everything to the cluster, submits the job, follows it, and brings the results back next to your data. Every transferred file is verified with a SHA-256 checksum.
 
 ---
 
@@ -16,8 +16,8 @@ A Windows desktop app to run MATLAB and Python jobs on the UNIGE **Baobab** clus
 Baobab GUI\
 ├── Baobab_Launcher.bat   ← double-click this
 ├── find_python.ps1       finds Python on your PC (used by the launcher)
-├── make_shortcut.ps1     creates the "Baobab HPC" shortcuts (used by the launcher)
-├── baobab.ico / .png     the app icon
+├── make_shortcut.ps1     creates the "HPC Forest" shortcuts (used by the launcher)
+├── forest.ico / .png     the app icon
 ├── baobab_app.py         the window
 ├── baobab_core.py        transfers, checksums, SLURM
 ├── baobab_nas.py         NAS copies, run on Baobab by the staging and upload jobs
@@ -38,7 +38,7 @@ Double-click **`Baobab_Launcher.bat`**. The first time, it:
 1. Looks for Python 3.9 or newer: registered installs (python.org, Anaconda, Miniconda), the PATH, conda environments and the usual folders. If none is found, it lists what it saw and lets you drag `python.exe` into the window. If Python is really missing, it installs Python with `winget`, or opens python.org. After a Python install, **close the window and double-click the launcher again**.
 2. Creates a private Python environment in a `.venv` subfolder and installs PySide6 and Paramiko. This takes a few minutes and happens only once.
 3. Checks for an SSH key. If there is none, it offers to create one (see Step 2).
-4. Creates a **Baobab HPC** shortcut with the app's icon on your desktop, in the Start menu (type "Baobab" to find it), and in the app folder. A `.bat` file can't carry an icon of its own, hence the shortcut.
+4. Creates an **HPC Forest** shortcut with the app's icon on your desktop, in the Start menu (type "Forest" to find it), and in the app folder. A `.bat` file can't carry an icon of its own, hence the shortcut.
 5. Opens the app.
 
 From then on, open the app with the shortcut. It runs the same launcher, which now goes straight to the window.
@@ -96,13 +96,12 @@ ssh <your_isis_username>@login1.baobab.hpc.unige.ch
 
 ## Step 4 — Connect in the app
 
-On the **Settings** page:
+On the **Settings** page, tick the clusters you want to use (Baobab, Yggdrasil, Bamboo; see *Using several clusters* below), then fill in:
 
 | Field | Value |
 |---|---|
 | ISIS username | your UNIGE login, e.g. `jdoe` |
 | Email | your UNIGE address, for end-of-job emails |
-| Cluster | `login1.baobab.hpc.unige.ch` (prefilled) |
 | SSH key | `C:\Users\<you>\.ssh\id_rsa` (prefilled if found) |
 
 Click **Connect**. The status line turns green and shows your scratch folder. The MATLAB and Python version lists are then read from Baobab; pick the versions you want. For Python, the app finds the extra modules each version needs (e.g. `GCCcore/...`) and shows the exact `module load` line.
@@ -117,7 +116,7 @@ On the **New job** page, five cards:
 
 1. **Code.** Choose your **project folder**, the folder with your scripts and helper functions. Then choose the **script to run** in the list. The whole folder is uploaded with its subfolders; `.git`, `__pycache__`, `.asv` backups and the `results` folder are left out.
 2. **Data and results.** Optionally choose a **data folder** anywhere on your disk. Results go by default to `<data folder>\results\<jobname>_<jobid>\`, or to `<project folder>\results\...` without data. Use **Choose folder…** to send them elsewhere.
-3. **Where to run.** Each partition your account can use is shown as a tile with its time limit, its free cores and idle nodes, free GPUs by type, and how many jobs are waiting. The badge tells you whether **your** request, with the resources below, **can start now**, **will queue**, or is **not possible** there (with the reason). Click anywhere on a tile to choose it. Private partitions of your group, if any, are behind **Show private partitions**.
+3. **Where to run.** Click ☆ on a tile to mark a **favorite**: favorites, from any cluster, are shown first, and the first one is chosen by default for a new job. Each partition your account can use is shown as a tile with its time limit, its free cores and idle nodes, free GPUs by type, and how many jobs are waiting. The badge tells you whether **your** request, with the resources below, **can start now**, **will queue**, or is **not possible** there (with the reason). Click anywhere on a tile to choose it. Private partitions of your group, if any, are behind **Show private partitions**.
 4. **Resources.** The partition you picked sets the limits: the CPU and memory fields stop at its largest node, and a wall time over its maximum is brought down to it. Your own values come back if you then pick a partition that allows them.
    - **CPUs:** the help line tells you what helps for MATLAB or Python. Plain Python uses one core; MATLAB often benefits from 4–8.
    - **Memory** is the **total** for the job. It follows the CPUs (3 GB each, the cluster default) until you set it yourself. The help line estimates a sensible amount from your largest data file.
@@ -225,6 +224,20 @@ Save checkpoints often enough that a lost run costs little, and make each step s
 
 ---
 
+## Using several clusters (Baobab, Yggdrasil, Bamboo)
+
+UNIGE runs three clusters, and your account and SSH key work on all of them. In **Settings**, tick the ones you want: the app connects to all of them at once and keeps one connection per cluster. Settings shows one status line per cluster.
+
+- **Comparing them.** In *Where to run*, the partitions are grouped by cluster, each group headed by its overall availability (free cores, free GPUs by type). The badges tell, cluster by cluster, whether your request could start right now. Clicking a tile picks both the cluster and the partition. The **Clusters** page lists every cluster's partitions and GPUs side by side.
+- **Each cluster has its own home and scratch.** Data copied to one is not visible on the others, so a job's code and data go to the cluster it runs on. The dataset list on the Clusters page says which cluster each dataset is on.
+- **Jobs remember their cluster.** The Jobs page has a *Cluster* column, and the app follows, cancels and downloads each job on its own cluster, several at a time.
+- **Software versions can differ between clusters.** If the MATLAB or Python version set in Settings doesn't exist on the chosen cluster, the app uses that cluster's newest one and says so in the submission log.
+- **The lab NAS needs one login per cluster,** since the Kerberos ticket lives in each cluster's home. You're asked for your ISIS password the first time a cluster needs the NAS.
+- **Interactive sessions:** pick the cluster at the top of the *Interactive* page. Its Open OnDemand address, scratch path and NAS path follow. Yggdrasil's and Bamboo's Open OnDemand addresses follow Baobab's pattern but are unverified: if one is wrong, correct it there, and the app remembers it.
+- **Server identity:** Baobab's and Yggdrasil's fingerprints are built in. Bamboo's is shown for you to confirm at the first connection.
+
+---
+
 ## Data and results on the lab NAS
 
 Datasets of tens or hundreds of GB shouldn't travel through your PC. Baobab can read and write the lab NAS (`//nasac-m2.isis.unige.ch/m-gholtmaat`) directly, inside the UNIGE network, at about 80 MB/s, roughly 290 GB per hour.
@@ -242,7 +255,7 @@ Datasets of tens or hundreds of GB shouldn't travel through your PC. Baobab can 
 
 **Checks.** Each file copied from the NAS is checked against the size listed on the NAS, and its SHA-256 is recorded. Results sent to the NAS are checked against their size on the NAS. Tick **Full verification** to also re-read every file from the NAS and compare checksums. That doubles the copy time, so it's off by default.
 
-**Datasets on scratch.** The Cluster page lists the datasets copied to Baobab (from your PC or the NAS) with their size and last use. Delete those you no longer need: scratch is shared, not backed up, and deleting never touches the originals.
+**Datasets on scratch.** The Clusters page lists the datasets copied to Baobab (from your PC or the NAS) with their size and last use. Delete those you no longer need: scratch is shared, not backed up, and deleting never touches the originals.
 
 ---
 
@@ -260,9 +273,15 @@ For work that needs a graphical interface (MATLAB's editor and figures, image vi
 
 ---
 
+## Appearance
+
+**Settings → Appearance** offers a light and a dark theme, or *Same as Windows*, which follows Windows' own setting, even when it changes while the app is open.
+
+---
+
 ## Seeing what is free
 
-The **Cluster** page shows, for every partition your account can use, the free cores, idle nodes, free GPUs and waiting jobs, plus a summary of free GPUs by type. It refreshes every 2 minutes, or with **Refresh**. The same information feeds the tiles on the New job page.
+The **Clusters** page shows, for every partition your account can use, the free cores, idle nodes, free GPUs and waiting jobs, plus a summary of free GPUs by type. It refreshes every 2 minutes, or with **Refresh**. The same information feeds the tiles on the New job page.
 
 ---
 
